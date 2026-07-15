@@ -1,5 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import { z } from "zod";
+import { getServer } from "../shared/server-registry.js";
 
 export function registerOpencodeListAgents(server: McpServer) {
   server.registerTool(
@@ -11,20 +13,68 @@ export function registerOpencodeListAgents(server: McpServer) {
       },
     },
     async ({ server_id }) => {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              server_id,
-              agents: [
-                { name: "mock-agent-a", model: "mock-model-a" },
-                { name: "mock-agent-b", model: "mock-model-b" },
-              ],
-            }),
-          },
-        ],
-      };
+      const instance = getServer(server_id);
+      if (!instance) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ server_id, status: "not_found" }),
+            },
+          ],
+        };
+      }
+
+      try {
+        const client = createOpencodeClient({ baseUrl: instance.baseUrl });
+        const { data, error } = await client.app.agents();
+
+        if (error) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  server_id,
+                  status: "error",
+                  message:
+                    typeof error === "object" && error !== null && "message" in error
+                      ? String(error.message)
+                      : String(error),
+                }),
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                server_id,
+                agents: data ?? [],
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                server_id,
+                status: "error",
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            },
+          ],
+        };
+      }
     },
   );
 }
