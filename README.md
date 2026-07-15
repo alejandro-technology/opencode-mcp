@@ -17,7 +17,7 @@ Subagents
 
 ## Status
 
-Early scaffolding. The MCP tool contracts are defined and mocked (static responses, no OpenCode SDK wiring yet). Next step is implementing the real logic behind each tool using `@opencode-ai`'s SDK (`createOpencode()`).
+Functional. All tools are wired to real OpenCode instances via `@opencode-ai/sdk` (`createOpencodeServer` / `createOpencodeClient`), covered by a Vitest suite. The server also installs `SIGHUP`/`SIGINT`/`SIGTERM`/`exit` handlers so no `opencode serve` child process outlives the MCP process.
 
 ## Design
 
@@ -84,33 +84,46 @@ Note that raising this value only raises the server-side clamp — the MCP *clie
 
 ```
 src/
-├── index.ts                  # MCP server entrypoint (stdio transport)
-├── modules/
-│   ├── tools/                 # One file per MCP tool, registered in index.ts
-│   └── prompts/                # One file per MCP prompt, registered in index.ts
-├── application/               # Use cases (empty, pending OpenCode SDK integration)
-├── domain/                    # Models and repository interfaces (empty)
-└── infrastructure/            # External clients, e.g. the OpenCode SDK client (empty)
+├── index.ts                   # MCP server entrypoint (stdio transport, shutdown handlers)
+└── modules/
+    ├── tools/                 # One file per MCP tool, registered in index.ts
+    ├── prompts/               # One file per MCP prompt, registered in index.ts
+    └── shared/                # Cross-tool infrastructure
+        ├── server-registry.ts   # Tracks running OpenCode servers; killAllServers() on shutdown
+        ├── task-registry.ts     # Maps task_id → OpenCode server + session
+        ├── opencode-client.ts   # Builds SDK clients from the registries
+        ├── config.ts            # MCP_TOOL_TIMEOUT resolution (env var / CLI arg)
+        └── mcp-result.ts        # jsonResult / jsonError MCP output helpers
 ```
+
+Each module ships with a colocated `*.test.ts` Vitest suite.
 
 ## Getting started
 
 ```bash
 pnpm install
-pnpm dev     # runs the server through the MCP Inspector
+pnpm dev     # runs the server through the MCP Inspector (tsx, no build needed)
 ```
 
 Other scripts:
 
 ```bash
-pnpm lint          # biome check
+pnpm test           # vitest run
+pnpm test:coverage  # vitest run --coverage
+pnpm lint           # biome check
 pnpm lint:write     # biome check --write
-pnpm build         # tsc build to ./build
+pnpm build          # clean tsc build to ./build (also the typecheck)
 ```
 
-## Roadmap
+To use it from an MCP host, build and point the host at the executable entrypoint:
 
-- [ ] Wire `opencode_start_server` / `opencode_stop_server` to `createOpencode()` / `createOpencodeClient()`
-- [ ] Wire `opencode_list_agents` to `app.agents()`
-- [ ] Implement an in-memory task store (`task_id` → `session_id` + status) backing `start_task` / `get_task_status` / `get_task_result`
-- [ ] Error handling for unreachable/crashed OpenCode instances
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "node",
+      "args": ["/path/to/opencode-mcp/build/src/index.js"]
+    }
+  }
+}
+```

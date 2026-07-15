@@ -5,8 +5,19 @@
   "main": "./build/src/index.js",
   "types": "./build/src/index.d.ts",
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "alejandro-technology",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alejandro-technology/opencode-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alejandro-technology/opencode-mcp/issues"
+  },
+  "homepage": "https://github.com/alejandro-technology/opencode-mcp",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "opencode-mcp": "./build/src/index.js"
@@ -19,7 +30,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "build": "rm -rf build && npx tsc && chmod +x build/src/index.js",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "publish": "npm publish --access public"
   },
   "files": [
     "build"
