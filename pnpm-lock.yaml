@@ -11,6 +11,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@opencode-ai/sdk':
+        specifier: ^1.17.20
+        version: 1.17.20
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -99,6 +102,9 @@ packages:
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
+
+  '@opencode-ai/sdk@1.17.20':
+    resolution: {integrity: sha512-Urb7Tp4mvJmyckNI/N79uEpWzZOyn4lE5LVPDVidXZ8BIlw6kxx2ctTPRYPJDF8HLPWGCZ7pCpHcmWgQCYyiNQ==}
 
   '@types/node@26.1.1':
     resolution: {integrity: sha512-nxAkRSVkN1Y0JC1W8ky/fTfkGsMmcrRsbx+3XoZE+rMOX71kLYTV7fLXpqud1GpbpP5TuffXFqfX7fH2GgZREw==}
@@ -647,6 +653,10 @@ snapshots:
       zod-to-json-schema: 3.25.2(zod@3.25.76)
     transitivePeerDependencies:
       - supports-color
+
+  '@opencode-ai/sdk@1.17.20':
+    dependencies:
+      cross-spawn: 7.0.6
 
   '@types/node@26.1.1':
     dependencies:
