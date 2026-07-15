@@ -22,8 +22,9 @@ There is **no test setup** — no runner, no test files. Don't assume a test com
 
 ## Architecture
 
-- Entrypoint: `src/index.ts` — creates `McpServer`, calls `registerTools(server)`, connects a `StdioServerTransport`. Installs `SIGHUP`/`SIGINT`/`SIGTERM`/`exit` handlers that call `killAllServers()` so no `opencode serve` child outlives the MCP process.
+- Entrypoint: `src/index.ts` — creates `McpServer`, calls `registerTools(server)` and `registerPrompts(server)`, connects a `StdioServerTransport`. Installs `SIGHUP`/`SIGINT`/`SIGTERM`/`exit` handlers that call `killAllServers()` so no `opencode serve` child outlives the MCP process.
 - All tools live in `src/modules/tools/*.ts`. Each exports a `registerOpencode<Name>(server: McpServer)` function that calls `server.registerTool(...)`. They are wired together in `src/modules/tools/index.ts`.
+- MCP prompts live in `src/modules/prompts/*.ts`, each exporting a `register<Name>Prompt(server: McpServer)` function that calls `server.registerPrompt(...)`. They are wired together in `src/modules/prompts/index.ts` via `registerPrompts`.
 - Registered tool names are prefixed `opencode_` (e.g. `opencode_start_task`); the source filenames are not prefixed (`start_task.ts`).
 - `src/modules/shared/` holds cross-tool infrastructure:
   - `server-registry.ts` — in-memory `Map<serverId, { serverId, baseUrl, close }>`; `killAllServers()` reaps every tracked child on shutdown.

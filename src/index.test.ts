@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn().mockResolvedValue(undefined);
 const registerToolsMock = vi.fn();
+const registerPromptsMock = vi.fn();
 const killAllServersMock = vi.fn();
 
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
@@ -20,6 +21,9 @@ vi.mock("./modules/shared/server-registry.js", () => ({
 vi.mock("./modules/tools/index.js", () => ({
   registerTools: registerToolsMock,
 }));
+vi.mock("./modules/prompts/index.js", () => ({
+  registerPrompts: registerPromptsMock,
+}));
 
 describe("index entrypoint", () => {
   const handlers = new Map<string, (...args: unknown[]) => void>();
@@ -32,6 +36,7 @@ describe("index entrypoint", () => {
     handlers.clear();
     connectMock.mockClear();
     registerToolsMock.mockClear();
+    registerPromptsMock.mockClear();
     killAllServersMock.mockClear();
 
     processOnSpy = vi
@@ -57,6 +62,7 @@ describe("index entrypoint", () => {
     await Promise.resolve();
 
     expect(registerToolsMock).toHaveBeenCalledOnce();
+    expect(registerPromptsMock).toHaveBeenCalledOnce();
     expect(connectMock).toHaveBeenCalledOnce();
     expect(handlers.has("SIGHUP")).toBe(true);
     expect(handlers.has("SIGINT")).toBe(true);

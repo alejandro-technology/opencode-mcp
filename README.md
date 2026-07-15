@@ -35,6 +35,12 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
 | `opencode_get_task_result` | Fetch the final result of a completed task |
 | `opencode_wait_for_task` | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses |
 
+## Prompts
+
+| Prompt | Description |
+| --- | --- |
+| `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow) |
+
 ## Configuration
 
 ### `MCP_TOOL_TIMEOUT`
@@ -80,7 +86,8 @@ Note that raising this value only raises the server-side clamp — the MCP *clie
 src/
 ├── index.ts                  # MCP server entrypoint (stdio transport)
 ├── modules/
-│   └── tools/                # One file per MCP tool, registered in index.ts
+│   ├── tools/                 # One file per MCP tool, registered in index.ts
+│   └── prompts/                # One file per MCP prompt, registered in index.ts
 ├── application/               # Use cases (empty, pending OpenCode SDK integration)
 ├── domain/                    # Models and repository interfaces (empty)
 └── infrastructure/            # External clients, e.g. the OpenCode SDK client (empty)

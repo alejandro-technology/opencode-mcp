@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { registerPrompts } from "./modules/prompts/index.js";
 import { killAllServers } from "./modules/shared/server-registry.js";
 import { registerTools } from "./modules/tools/index.js";
 
@@ -25,6 +26,7 @@ process.on("exit", killAllServers);
 
 async function main() {
   registerTools(server);
+  registerPrompts(server);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("OpenCode MCP Server running on stdio");
