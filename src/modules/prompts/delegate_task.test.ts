@@ -3,7 +3,7 @@ import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
 import { registerDelegateTaskPrompt } from "./delegate_task.js";
 
 describe("registerDelegateTaskPrompt", () => {
-  it("registers the delegate_task prompt", () => {
+  it("registers the delegate_task prompt without an argsSchema", () => {
     const { server, registerPrompt } = createFakeMcpServer();
     registerDelegateTaskPrompt(server);
 
@@ -12,68 +12,25 @@ describe("registerDelegateTaskPrompt", () => {
       expect.objectContaining({ description: expect.any(String) }),
       expect.any(Function),
     );
+    const config = registerPrompt.mock.calls[0][1] as Record<string, unknown>;
+    expect(config).not.toHaveProperty("argsSchema");
   });
 
-  it("produces a single-task workflow without agent or parallel_tasks", () => {
+  it("returns static workflow instructions with the recommended models", () => {
     const { server, getPromptHandler } = createFakeMcpServer();
     registerDelegateTaskPrompt(server);
-    const handler = getPromptHandler<(args: { task: string }) => { messages: unknown[] }>();
+    const handler = getPromptHandler<() => { messages: unknown[] }>();
 
-    const result = handler({ task: "Fix the bug" });
+    const result = handler();
     const text = (result.messages[0] as { content: { text: string } }).content.text;
 
-    expect(text).toContain("1. Fix the bug");
-    expect(text).toContain("No specific agent was requested");
-    expect(text).toContain('mode "all" and the single task_id');
     expect(result.messages).toHaveLength(1);
-  });
-
-  it("includes the agent instruction when agent is provided", () => {
-    const { server, getPromptHandler } = createFakeMcpServer();
-    registerDelegateTaskPrompt(server);
-    const handler =
-      getPromptHandler<(args: { task: string; agent?: string }) => { messages: unknown[] }>();
-
-    const result = handler({ task: "Fix the bug", agent: "build" });
-    const text = (result.messages[0] as { content: { text: string } }).content.text;
-
-    expect(text).toContain('Use the agent "build"');
-  });
-
-  it("lists all parallel tasks and mentions the 'any' wait mode", () => {
-    const { server, getPromptHandler } = createFakeMcpServer();
-    registerDelegateTaskPrompt(server);
-    const handler =
-      getPromptHandler<
-        (args: { task: string; parallel_tasks?: string }) => { messages: unknown[] }
-      >();
-
-    const result = handler({
-      task: "Fix the bug",
-      parallel_tasks: "Write tests, Update docs",
-    });
-    const text = (result.messages[0] as { content: { text: string } }).content.text;
-
-    expect(text).toContain("1. Fix the bug");
-    expect(text).toContain("2. Write tests");
-    expect(text).toContain("3. Update docs");
-    expect(text).toContain('mode "any"');
-  });
-
-  it("filters out empty entries from parallel_tasks", () => {
-    const { server, getPromptHandler } = createFakeMcpServer();
-    registerDelegateTaskPrompt(server);
-    const handler =
-      getPromptHandler<
-        (args: { task: string; parallel_tasks?: string }) => { messages: unknown[] }
-      >();
-
-    const result = handler({ task: "Fix the bug", parallel_tasks: "Write tests,,  " });
-    const text = (result.messages[0] as { content: { text: string } }).content.text;
-    const taskListBlock = text.split("Workflow:")[0];
-
-    expect(taskListBlock).toContain("1. Fix the bug");
-    expect(taskListBlock).toContain("2. Write tests");
-    expect(taskListBlock).not.toContain("3.");
+    expect(text).toContain("Fable 5, Opus 4.8, or GPT 5.6 Sol");
+    expect(text).toContain("opencode_start_server");
+    expect(text).toContain("opencode_list_agents");
+    expect(text).toContain("opencode_start_task");
+    expect(text).toContain("opencode_wait_for_task");
+    expect(text).toContain("opencode_get_task_result");
+    expect(text).toContain("opencode_get_task_status");
   });
 });

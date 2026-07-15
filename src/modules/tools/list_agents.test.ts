@@ -10,6 +10,24 @@ vi.mock("@opencode-ai/sdk", () => ({
 const { registerOpencodeListAgents } = await import("./list_agents.js");
 const { registerServer, killAllServers } = await import("../shared/server-registry.js");
 
+function mockClient({
+  agents = { data: [] },
+  providers = { data: { providers: [], default: {} } },
+}: {
+  agents?: unknown;
+  providers?: unknown;
+} = {}) {
+  createOpencodeClientMock.mockReturnValue({
+    app: {
+      agents:
+        agents instanceof Error
+          ? vi.fn().mockRejectedValue(agents)
+          : vi.fn().mockResolvedValue(agents),
+    },
+    config: { providers: vi.fn().mockResolvedValue(providers) },
+  });
+}
+
 describe("opencode_list_agents", () => {
   beforeEach(() => {
     killAllServers();
@@ -31,10 +49,58 @@ describe("opencode_list_agents", () => {
     });
   });
 
-  it("returns the list of agents on success", async () => {
+  it("splits agents into native/custom and summarizes models and providers", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockResolvedValue({ data: [{ name: "build" }] }) },
+    mockClient({
+      agents: {
+        data: [
+          {
+            name: "plan",
+            mode: "primary",
+            native: true,
+            description: "Planning agent",
+            model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+            tools: {},
+            permission: {},
+            options: {},
+          },
+          {
+            name: "legacy-build",
+            mode: "primary",
+            builtIn: true,
+            tools: {},
+            permission: {},
+            options: {},
+          },
+          {
+            name: "reviewer",
+            mode: "subagent",
+            native: false,
+            tools: {},
+            permission: {},
+            options: {},
+          },
+          {
+            name: "no-flags",
+            mode: "subagent",
+            tools: {},
+            permission: {},
+            options: {},
+          },
+        ],
+      },
+      providers: {
+        data: {
+          providers: [
+            {
+              id: "anthropic",
+              name: "Anthropic",
+              models: { "claude-sonnet-5": {}, "claude-opus-4-8": {} },
+            },
+          ],
+          default: { anthropic: "claude-sonnet-5" },
+        },
+      },
     });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
@@ -44,16 +110,44 @@ describe("opencode_list_agents", () => {
 
     expect(result).toEqual({
       content: [
-        { type: "text", text: JSON.stringify({ server_id: "srv-1", agents: [{ name: "build" }] }) },
+        {
+          type: "text",
+          text: JSON.stringify({
+            server_id: "srv-1",
+            agents: {
+              native: [
+                {
+                  name: "plan",
+                  mode: "primary",
+                  description: "Planning agent",
+                  model: "anthropic/claude-sonnet-5",
+                },
+                { name: "legacy-build", mode: "primary" },
+              ],
+              custom: [
+                { name: "reviewer", mode: "subagent" },
+                { name: "no-flags", mode: "subagent" },
+              ],
+            },
+            models: {
+              defaults: { anthropic: "claude-sonnet-5" },
+              providers: [
+                {
+                  provider: "anthropic",
+                  name: "Anthropic",
+                  models: ["claude-sonnet-5", "claude-opus-4-8"],
+                },
+              ],
+            },
+          }),
+        },
       ],
     });
   });
 
-  it("defaults to an empty array when data is missing", async () => {
+  it("defaults to empty collections when data is missing", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockResolvedValue({}) },
-    });
+    mockClient({ agents: {}, providers: {} });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const handler = fake.getHandler();
@@ -61,15 +155,22 @@ describe("opencode_list_agents", () => {
     const result = await handler({ server_id: "srv-1" });
 
     expect(result).toEqual({
-      content: [{ type: "text", text: JSON.stringify({ server_id: "srv-1", agents: [] }) }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            server_id: "srv-1",
+            agents: { native: [], custom: [] },
+            models: { defaults: {}, providers: [] },
+          }),
+        },
+      ],
     });
   });
 
-  it("returns an error result when the SDK reports an object error with a message", async () => {
+  it("returns an error result when the agents call reports an object error with a message", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockResolvedValue({ error: { message: "bad request" } }) },
-    });
+    mockClient({ agents: { error: { message: "bad request" } } });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const handler = fake.getHandler();
@@ -87,11 +188,9 @@ describe("opencode_list_agents", () => {
     });
   });
 
-  it("returns an error result when the SDK reports a non-object error", async () => {
+  it("returns an error result when the providers call reports a non-object error", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockResolvedValue({ error: "plain string error" }) },
-    });
+    mockClient({ providers: { error: "plain string error" } });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const handler = fake.getHandler();
@@ -115,9 +214,7 @@ describe("opencode_list_agents", () => {
 
   it("returns an error result when the request throws an Error", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockRejectedValue(new Error("network down")) },
-    });
+    mockClient({ agents: new Error("network down") });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const handler = fake.getHandler();
@@ -139,6 +236,7 @@ describe("opencode_list_agents", () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
     createOpencodeClientMock.mockReturnValue({
       app: { agents: vi.fn().mockRejectedValue("weird failure") },
+      config: { providers: vi.fn().mockResolvedValue({ data: { providers: [], default: {} } }) },
     });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
