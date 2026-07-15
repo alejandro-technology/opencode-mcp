@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!!**/build"]
+    "includes": ["**", "!!**/build", "!!**/coverage"]
   },
   "formatter": {
     "enabled": true,

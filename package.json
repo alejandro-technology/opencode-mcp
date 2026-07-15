@@ -2,21 +2,23 @@
   "name": "opencode-mcp",
   "version": "1.0.0",
   "description": "",
-  "main": "./build/index.js",
-  "types": "./build/index.d.ts",
+  "main": "./build/src/index.js",
+  "types": "./build/src/index.d.ts",
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "bin": {
-    "opencode-mcp": "./build/index.js"
+    "opencode-mcp": "./build/src/index.js"
   },
   "scripts": {
     "dev": "npx -y @modelcontextprotocol/inspector pnpx tsx src/index.ts",
     "lint": "biome check .",
     "lint:write": "biome check --write .",
     "lint:format": "biome format --write .",
-    "build": "npx tsc",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "build": "npx tsc && chmod +x build/src/index.js",
     "prepare": "npm run build"
   },
   "files": [
@@ -30,6 +32,8 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",
     "@types/node": "^26.1.1",
-    "typescript": "^7.0.2"
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

@@ -45,3 +45,42 @@ export async function lastAssistantEntry(
   }
   return undefined;
 }
+
+export type TaskStatus = "pending" | "running" | "completed" | "failed";
+
+export interface TaskStatusResult {
+  task_id: string;
+  status: TaskStatus;
+  error?: string;
+}
+
+/**
+ * Derive the current status of a task by inspecting session busy state and
+ * the last assistant message. Shared by opencode_get_task_status and
+ * opencode_wait_for_task so both use identical status derivation.
+ */
+export async function deriveTaskStatus(
+  client: OpencodeClient,
+  sessionId: string,
+  taskId: string,
+): Promise<TaskStatusResult> {
+  // The status map only lists sessions that are actively working.
+  const statusRes = await client.session.status();
+  const sessionStatus = statusRes.data?.[sessionId];
+  if (sessionStatus?.type === "busy" || sessionStatus?.type === "retry") {
+    return { task_id: taskId, status: "running" };
+  }
+
+  // Not busy: inspect the last assistant message to tell pending from done.
+  const entry = await lastAssistantEntry(client, sessionId);
+  if (!entry) {
+    return { task_id: taskId, status: "pending" };
+  }
+  if (entry.info.error) {
+    return { task_id: taskId, status: "failed", error: entry.info.error.name };
+  }
+  if (entry.info.time.completed) {
+    return { task_id: taskId, status: "completed" };
+  }
+  return { task_id: taskId, status: "running" };
+}
