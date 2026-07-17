@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerPrompts } from "./modules/prompts/index.js";
+import { registerResources } from "./modules/resources/index.js";
 import { killAllServers } from "./modules/shared/server-registry.js";
 import { registerTools } from "./modules/tools/index.js";
 
@@ -26,8 +26,8 @@ process.on("SIGTERM", shutdown);
 process.on("exit", killAllServers);
 
 async function main() {
+  registerResources(server);
   registerTools(server);
-  registerPrompts(server);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("OpenCode MCP Server running on stdio");

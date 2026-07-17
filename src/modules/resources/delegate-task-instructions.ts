@@ -38,22 +38,22 @@ Workflow:
 
 Do not call opencode_get_task_result before the task has finished, and prefer opencode_wait_for_task over polling opencode_get_task_status in a loop.`;
 
-export function registerDelegateTaskPrompt(server: McpServer) {
-  server.registerPrompt(
-    "delegate_task",
+export function registerDelegateTaskResource(server: McpServer) {
+  server.registerResource(
+    "delegate-task-instructions",
+    "opencode://instructions/delegate-task",
     {
       title: "Delegate task to OpenCode",
       description:
         "Instructions for the correct workflow to delegate tasks to OpenCode agents via this MCP server",
+      mimeType: "text/plain",
     },
     () => ({
-      messages: [
+      contents: [
         {
-          role: "user",
-          content: {
-            type: "text",
-            text: DELEGATE_TASK_INSTRUCTIONS,
-          },
+          uri: "opencode://instructions/delegate-task",
+          text: DELEGATE_TASK_INSTRUCTIONS,
+          mimeType: "text/plain",
         },
       ],
     }),
