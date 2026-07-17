@@ -7,16 +7,19 @@ import { killAllServers } from "./modules/shared/server-registry.js";
 import { registerTools } from "./modules/tools/index.js";
 
 // Create server instance
-const server = new McpServer({
-  name: "opencode-mcp",
-  version: "1.0.0",
-  title: "OpenCode MCP",
-  description:
-    "MCP server that drives an OpenCode instance and delegates work asynchronously to its agents",
-  websiteUrl: "https://opencode-mcp.alejandrotechnology.com",
-}, {
-  instructions: DELEGATE_TASK_INSTRUCTIONS,
-});
+const server = new McpServer(
+  {
+    name: "opencode-mcp",
+    version: "1.0.0",
+    title: "OpenCode MCP",
+    description:
+      "MCP server that drives an OpenCode instance and delegates work asynchronously to its agents",
+    websiteUrl: "https://opencode-mcp.alejandrotechnology.com",
+  },
+  {
+    instructions: DELEGATE_TASK_INSTRUCTIONS,
+  },
+);
 
 function shutdown(signal: NodeJS.Signals) {
   console.error(`Received ${signal}, stopping tracked OpenCode servers...`);
