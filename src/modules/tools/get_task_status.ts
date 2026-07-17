@@ -10,9 +10,15 @@ export function registerOpencodeGetTaskStatus(server: McpServer) {
       description: "Get the current status of a delegated task",
       inputSchema: {
         task_id: z.string().describe("Id of the task to check"),
+        include_progress: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, include a partial output snippet and the currently running tool while the task is still running",
+          ),
       },
     },
-    async ({ task_id }) => {
+    async ({ task_id, include_progress }) => {
       const resolved = clientForTask(task_id);
       if (!resolved) {
         return jsonError({ task_id, status: "not_found" });
@@ -20,7 +26,9 @@ export function registerOpencodeGetTaskStatus(server: McpServer) {
       const { client, sessionId } = resolved;
 
       try {
-        const result = await deriveTaskStatus(client, sessionId, task_id);
+        const result = await deriveTaskStatus(client, sessionId, task_id, {
+          includeProgress: include_progress,
+        });
         return jsonResult(result);
       } catch (error) {
         return jsonError({

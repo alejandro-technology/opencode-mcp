@@ -25,12 +25,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Re-derive status with progress for every task that is not yet finished.
+ * Only called once, right before returning a final result, never inside the
+ * poll loop. Failures are swallowed per-task so one bad re-derivation doesn't
+ * fail the whole call.
+ */
+async function enrichUnfinishedWithProgress(
+  tasks: WaitTaskResult[],
+  taskData: Array<{ task_id: string; client: NonNullable<ReturnType<typeof clientForTask>> }>,
+): Promise<WaitTaskResult[]> {
+  const clientByTaskId = new Map(taskData.map((entry) => [entry.task_id, entry.client]));
+
+  return Promise.all(
+    tasks.map(async (task) => {
+      if (isFinished(task)) return task;
+      // Every task_id in `tasks` was resolved into taskData before polling started.
+      // biome-ignore lint/style/noNonNullAssertion: guaranteed present, see comment above
+      const client = clientByTaskId.get(task.task_id)!;
+      try {
+        return await deriveTaskStatus(client.client, client.sessionId, task.task_id, {
+          includeProgress: true,
+        });
+      } catch {
+        return task;
+      }
+    }),
+  );
+}
+
 export function registerOpencodeWaitForTask(server: McpServer) {
   server.registerTool(
     "opencode_wait_for_task",
     {
       description:
-        "Long-poll one or more delegated tasks until they finish or the timeout elapses. Use mode 'all' to wait for all tasks, or 'any' to return as soon as one completes.",
+        "Long-poll one or more delegated tasks until they finish or the timeout elapses. Use mode 'all' to wait for all tasks, or 'any' to return as soon as one completes. Set include_progress to enrich still-running tasks in the final result with a partial output snippet and the currently running tool.",
       inputSchema: {
         task_ids: z.string().array().min(1).describe("IDs of tasks to wait for"),
         mode: z
@@ -47,9 +76,15 @@ export function registerOpencodeWaitForTask(server: McpServer) {
           .describe(
             `Time between status checks in milliseconds (default ${DEFAULT_POLL_INTERVAL_MS})`,
           ),
+        include_progress: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, enrich tasks that are still not finished in the returned result with a partial output snippet and the currently running tool (not used during polling, only on the final result)",
+          ),
       },
     },
-    async ({ task_ids, mode = "all", timeout_ms, poll_interval_ms }) => {
+    async ({ task_ids, mode = "all", timeout_ms, poll_interval_ms, include_progress }) => {
       // Fail-fast: check for unknown task IDs before polling starts
       const unknownIds: string[] = [];
       const taskData: Array<{
@@ -105,11 +140,17 @@ export function registerOpencodeWaitForTask(server: McpServer) {
         }
 
         if (mode === "any" && tasks.some(isFinished)) {
-          return jsonResult({ mode, tasks, timed_out: false });
+          const enriched = include_progress
+            ? await enrichUnfinishedWithProgress(tasks, taskData)
+            : tasks;
+          return jsonResult({ mode, tasks: enriched, timed_out: false });
         }
 
         if (Date.now() >= deadline) {
-          return jsonResult({ mode, tasks, timed_out: true });
+          const enriched = include_progress
+            ? await enrichUnfinishedWithProgress(tasks, taskData)
+            : tasks;
+          return jsonResult({ mode, tasks: enriched, timed_out: true });
         }
 
         await sleep(pollInterval);

@@ -9,7 +9,9 @@ vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   deriveTaskStatus: (...args: unknown[]) => deriveTaskStatusMock(...args),
 }));
 
-const { registerOpencodeGetTaskStatus } = await import("../../../src/modules/tools/get_task_status.js");
+const { registerOpencodeGetTaskStatus } = await import(
+  "../../../src/modules/tools/get_task_status.js"
+);
 
 describe("opencode_get_task_status", () => {
   beforeEach(() => {
@@ -46,7 +48,40 @@ describe("opencode_get_task_status", () => {
     expect(result).toEqual({
       content: [{ type: "text", text: JSON.stringify({ task_id: "task-1", status: "running" }) }],
     });
-    expect(deriveTaskStatusMock).toHaveBeenCalledWith(client, "s1", "task-1");
+    expect(deriveTaskStatusMock).toHaveBeenCalledWith(client, "s1", "task-1", {
+      includeProgress: undefined,
+    });
+  });
+
+  it("passes includeProgress through to deriveTaskStatus when include_progress is true", async () => {
+    const client = {};
+    clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
+    deriveTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      status: "running",
+      progress: { text_snippet: "hi", tool_calls_completed: 0 },
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeGetTaskStatus(fake.server);
+    const handler = fake.getHandler();
+
+    const result = await handler({ task_id: "task-1", include_progress: true });
+
+    expect(deriveTaskStatusMock).toHaveBeenCalledWith(client, "s1", "task-1", {
+      includeProgress: true,
+    });
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            task_id: "task-1",
+            status: "running",
+            progress: { text_snippet: "hi", tool_calls_completed: 0 },
+          }),
+        },
+      ],
+    });
   });
 
   it("returns completed status", async () => {

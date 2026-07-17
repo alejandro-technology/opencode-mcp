@@ -1,5 +1,9 @@
 # opencode-mcp
 
+[![CI](https://github.com/alejandro-technology/opencode-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alejandro-technology/opencode-mcp/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/alejandro-technology/opencode-mcp/blob/main/vitest.config.ts)
+[![npm](https://img.shields.io/npm/v/mcp-server-opencode)](https://www.npmjs.com/package/mcp-server-opencode)
+
 An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, Codex CLI, Cursor, etc. — drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
 
 ```
@@ -29,9 +33,9 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
 | `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt (optional `agent` / `model` override)    |
 | `opencode_continue_task`   | Send a follow-up prompt to an existing task's session for iterative back-and-forth with the subagent      |
 | `opencode_cancel_task`     | Abort a running delegated task by cancelling its session                                                  |
-| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`)                      |
+| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`); optional `include_progress` adds a partial output snippet and the currently running tool while it's still running |
 | `opencode_get_task_result` | Fetch the final result of a completed task                                                                |
-| `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses |
+| `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses; optional `include_progress` enriches any still-unfinished tasks in the final result with a partial output snippet and the currently running tool |
 
 
 | Prompt          | Description                                                                                          |
@@ -174,7 +178,7 @@ src/
         └── mcp-result.ts        # jsonResult / jsonError MCP output helpers
 ```
 
-Each module ships with a colocated `*.test.ts` Vitest suite.
+Each module ships with a `*.test.ts` Vitest suite under the parallel `tests/` tree mirroring `src/`.
 
 ## Getting started
 

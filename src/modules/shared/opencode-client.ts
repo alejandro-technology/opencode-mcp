@@ -48,10 +48,58 @@ export async function lastAssistantEntry(
 
 export type TaskStatus = "pending" | "running" | "completed" | "failed";
 
+export interface TaskProgress {
+  /** Last ~500 chars of concatenated TextPart text from the last assistant message. */
+  text_snippet: string;
+  /** Count of ToolPart parts whose state.status is "completed". */
+  tool_calls_completed: number;
+  /** Tool name of the last ToolPart whose state.status is "running" or "pending". */
+  current_tool?: string;
+  /** state.status of that tool part. */
+  current_tool_status?: string;
+}
+
 export interface TaskStatusResult {
   task_id: string;
   status: TaskStatus;
   error?: string;
+  progress?: TaskProgress;
+}
+
+const TEXT_SNIPPET_MAX_LENGTH = 500;
+
+/** Build a TaskProgress summary from a message's parts. */
+export function buildProgress(parts: Part[]): TaskProgress {
+  let text = "";
+  let toolCallsCompleted = 0;
+  let currentTool: string | undefined;
+  let currentToolStatus: string | undefined;
+
+  for (const part of parts) {
+    if (part.type === "text") {
+      text += part.text;
+      continue;
+    }
+    if (part.type === "tool") {
+      if (part.state.status === "completed") {
+        toolCallsCompleted++;
+      } else if (part.state.status === "running" || part.state.status === "pending") {
+        currentTool = part.tool;
+        currentToolStatus = part.state.status;
+      }
+    }
+  }
+
+  return {
+    text_snippet: text.slice(-TEXT_SNIPPET_MAX_LENGTH),
+    tool_calls_completed: toolCallsCompleted,
+    current_tool: currentTool,
+    current_tool_status: currentToolStatus,
+  };
+}
+
+export interface DeriveTaskStatusOptions {
+  includeProgress?: boolean;
 }
 
 /**
@@ -63,11 +111,22 @@ export async function deriveTaskStatus(
   client: OpencodeClient,
   sessionId: string,
   taskId: string,
+  options?: DeriveTaskStatusOptions,
 ): Promise<TaskStatusResult> {
+  const includeProgress = options?.includeProgress ?? false;
+
   // The status map only lists sessions that are actively working.
   const statusRes = await client.session.status();
   const sessionStatus = statusRes.data?.[sessionId];
   if (sessionStatus?.type === "busy" || sessionStatus?.type === "retry") {
+    if (includeProgress) {
+      const entry = await lastAssistantEntry(client, sessionId);
+      return {
+        task_id: taskId,
+        status: "running",
+        progress: entry ? buildProgress(entry.parts) : undefined,
+      };
+    }
     return { task_id: taskId, status: "running" };
   }
 
@@ -82,5 +141,9 @@ export async function deriveTaskStatus(
   if (entry.info.time.completed) {
     return { task_id: taskId, status: "completed" };
   }
-  return { task_id: taskId, status: "running" };
+  return {
+    task_id: taskId,
+    status: "running",
+    progress: includeProgress ? buildProgress(entry.parts) : undefined,
+  };
 }

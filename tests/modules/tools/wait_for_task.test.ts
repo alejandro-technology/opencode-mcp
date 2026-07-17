@@ -449,4 +449,142 @@ describe("opencode_wait_for_task", () => {
     const parsed = JSON.parse((result.content[0] as { type: string; text: string }).text);
     expect(parsed.timed_out).toBe(true);
   });
+
+  it("enriches unfinished tasks with progress on timeout when include_progress is true", async () => {
+    vi.useFakeTimers();
+    const client = {};
+    clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
+    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
+      if (options?.includeProgress) {
+        return {
+          task_id: taskId,
+          status: "running",
+          progress: { text_snippet: "partial output", tool_calls_completed: 2 },
+        };
+      }
+      return { task_id: taskId, status: "running" };
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const handler = fake.getHandler();
+
+    const promise = handler({
+      task_ids: ["task-1"],
+      mode: "all",
+      timeout_ms: 2000,
+      poll_interval_ms: 1000,
+      include_progress: true,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    const parsed = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    expect(parsed.timed_out).toBe(true);
+    expect(parsed.tasks).toEqual([
+      {
+        task_id: "task-1",
+        status: "running",
+        progress: { text_snippet: "partial output", tool_calls_completed: 2 },
+      },
+    ]);
+  });
+
+  it("does not request progress during polling, only once at the end", async () => {
+    vi.useFakeTimers();
+    const client = {};
+    clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
+    const includeProgressCalls: Array<boolean | undefined> = [];
+    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
+      includeProgressCalls.push(options?.includeProgress);
+      return { task_id: taskId, status: "running" };
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const handler = fake.getHandler();
+
+    const promise = handler({
+      task_ids: ["task-1"],
+      mode: "all",
+      timeout_ms: 2000,
+      poll_interval_ms: 1000,
+      include_progress: true,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+
+    // Polling iterations (no progress) + one final enrichment call (with progress).
+    expect(includeProgressCalls.slice(0, -1).every((v) => v === undefined)).toBe(true);
+    expect(includeProgressCalls.at(-1)).toBe(true);
+  });
+
+  it("falls back to the un-enriched entry when progress re-derivation fails", async () => {
+    vi.useFakeTimers();
+    const client = {};
+    clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
+    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
+      if (options?.includeProgress) {
+        throw new Error("boom");
+      }
+      return { task_id: taskId, status: "running" };
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const handler = fake.getHandler();
+
+    const promise = handler({
+      task_ids: ["task-1"],
+      mode: "all",
+      timeout_ms: 1000,
+      poll_interval_ms: 1000,
+      include_progress: true,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    const parsed = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    expect(parsed.timed_out).toBe(true);
+    expect(parsed.tasks).toEqual([{ task_id: "task-1", status: "running" }]);
+  });
+
+  it("enriches unfinished tasks in mode 'any' when include_progress is true", async () => {
+    vi.useFakeTimers();
+    const client = {};
+    clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
+    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
+      if (taskId === "task-1") return { task_id: "task-1", status: "completed" };
+      if (options?.includeProgress) {
+        return {
+          task_id: "task-2",
+          status: "running",
+          progress: { text_snippet: "still going", tool_calls_completed: 1 },
+        };
+      }
+      return { task_id: "task-2", status: "running" };
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const handler = fake.getHandler();
+
+    const promise = handler({
+      task_ids: ["task-1", "task-2"],
+      mode: "any",
+      poll_interval_ms: 1000,
+      include_progress: true,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    const parsed = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    expect(parsed.timed_out).toBe(false);
+    expect(parsed.tasks).toEqual([
+      { task_id: "task-1", status: "completed" },
+      {
+        task_id: "task-2",
+        status: "running",
+        progress: { text_snippet: "still going", tool_calls_completed: 1 },
+      },
+    ]);
+  });
 });
