@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
-import { registerDelegateTaskPrompt } from "./delegate_task.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
+import { registerDelegateTaskPrompt } from "../../../src/modules/prompts/delegate_task.js";
 
 describe("registerDelegateTaskPrompt", () => {
   it("registers the delegate_task prompt without an argsSchema", () => {

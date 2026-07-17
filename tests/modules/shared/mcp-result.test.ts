@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { jsonError, jsonResult } from "./mcp-result.js";
+import { jsonError, jsonResult } from "../../../src/modules/shared/mcp-result.js";
 
 describe("jsonResult", () => {
   it("wraps a payload as a text content block", () => {

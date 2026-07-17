@@ -15,13 +15,13 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
     return {};
   }),
 }));
-vi.mock("./modules/shared/server-registry.js", () => ({
+vi.mock("../src/modules/shared/server-registry.js", () => ({
   killAllServers: killAllServersMock,
 }));
-vi.mock("./modules/tools/index.js", () => ({
+vi.mock("../src/modules/tools/index.js", () => ({
   registerTools: registerToolsMock,
 }));
-vi.mock("./modules/prompts/index.js", () => ({
+vi.mock("../src/modules/prompts/index.js", () => ({
   registerPrompts: registerPromptsMock,
 }));
 
@@ -56,7 +56,7 @@ describe("index entrypoint", () => {
   });
 
   it("registers tools, connects the transport, and wires shutdown handlers", async () => {
-    await import("./index.js");
+    await import("../src/index.js");
     // main() is async; flush microtasks
     await Promise.resolve();
     await Promise.resolve();
@@ -71,7 +71,7 @@ describe("index entrypoint", () => {
   });
 
   it("shuts down tracked servers and exits on SIGINT", async () => {
-    await import("./index.js");
+    await import("../src/index.js");
     await Promise.resolve();
 
     handlers.get("SIGINT")?.("SIGINT");
@@ -81,7 +81,7 @@ describe("index entrypoint", () => {
   });
 
   it("calls killAllServers as a safety net on process exit", async () => {
-    await import("./index.js");
+    await import("../src/index.js");
     await Promise.resolve();
 
     handlers.get("exit")?.();
@@ -92,7 +92,7 @@ describe("index entrypoint", () => {
   it("logs and exits with code 1 when main() rejects", async () => {
     connectMock.mockRejectedValueOnce(new Error("connect failed"));
 
-    await import("./index.js");
+    await import("../src/index.js");
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();

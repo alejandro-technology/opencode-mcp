@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 vi.mock("node:crypto", () => ({
   randomUUID: () => "generated-task-id",
 }));
 
-const { registerOpencodeStartTask } = await import("./start_task.js");
-const { registerServer, killAllServers } = await import("../shared/server-registry.js");
+const { registerOpencodeStartTask } = await import("../../../src/modules/tools/start_task.js");
+const { registerServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
 
 describe("opencode_start_task", () => {
   beforeEach(() => {
@@ -78,8 +78,8 @@ describe("opencode_start_task", () => {
       }),
     }));
     vi.resetModules();
-    const mod = await import("./start_task.js");
-    const registry = await import("../shared/server-registry.js");
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
     registry.killAllServers();
     registry.registerServer({
       serverId: "srv-1",
@@ -120,9 +120,9 @@ describe("opencode_start_task", () => {
       }),
     }));
     vi.resetModules();
-    const mod = await import("./start_task.js");
-    const registry = await import("../shared/server-registry.js");
-    const tasks = await import("../shared/task-registry.js");
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    const tasks = await import("../../../src/modules/shared/task-registry.js");
     registry.killAllServers();
     registry.registerServer({
       serverId: "srv-1",
@@ -174,8 +174,8 @@ describe("opencode_start_task", () => {
       }),
     }));
     vi.resetModules();
-    const mod = await import("./start_task.js");
-    const registry = await import("../shared/server-registry.js");
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
     registry.killAllServers();
     registry.registerServer({
       serverId: "srv-1",
@@ -207,8 +207,8 @@ describe("opencode_start_task", () => {
       }),
     }));
     vi.resetModules();
-    const mod = await import("./start_task.js");
-    const registry = await import("../shared/server-registry.js");
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
     registry.killAllServers();
     registry.registerServer({
       serverId: "srv-1",
@@ -245,8 +245,8 @@ describe("opencode_start_task", () => {
       }),
     }));
     vi.resetModules();
-    const mod = await import("./start_task.js");
-    const registry = await import("../shared/server-registry.js");
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
     registry.killAllServers();
     registry.registerServer({
       serverId: "srv-1",

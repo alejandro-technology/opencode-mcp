@@ -11,9 +11,9 @@ import {
   clientForTask,
   deriveTaskStatus,
   lastAssistantEntry,
-} from "./opencode-client.js";
-import { killAllServers, registerServer } from "./server-registry.js";
-import { registerTask, removeTask } from "./task-registry.js";
+} from "../../../src/modules/shared/opencode-client.js";
+import { killAllServers, registerServer } from "../../../src/modules/shared/server-registry.js";
+import { registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
 
 describe("clientForServer", () => {
   beforeEach(() => {

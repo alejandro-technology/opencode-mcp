@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
-import { registerTools } from "./index.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
+import { registerTools } from "../../../src/modules/tools/index.js";
 
 describe("registerTools", () => {
   it("registers every opencode tool", () => {

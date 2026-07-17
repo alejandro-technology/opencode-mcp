@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const createOpencodeClientMock = vi.fn();
 
@@ -7,8 +7,8 @@ vi.mock("@opencode-ai/sdk", () => ({
   createOpencodeClient: (...args: unknown[]) => createOpencodeClientMock(...args),
 }));
 
-const { registerOpencodeListAgents } = await import("./list_agents.js");
-const { registerServer, killAllServers } = await import("../shared/server-registry.js");
+const { registerOpencodeListAgents } = await import("../../../src/modules/tools/list_agents.js");
+const { registerServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
 
 function mockClient({
   agents = { data: [] },

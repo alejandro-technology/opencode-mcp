@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getMaxToolTimeoutMs } from "./config.js";
+import { getMaxToolTimeoutMs } from "../../../src/modules/shared/config.js";
 
 const originalArgv = [...process.argv];
 

@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const clientForTaskMock = vi.fn();
 const deriveTaskStatusMock = vi.fn();
 
-vi.mock("../shared/opencode-client.js", () => ({
+vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   clientForTask: (...args: unknown[]) => clientForTaskMock(...args),
   deriveTaskStatus: (...args: unknown[]) => deriveTaskStatusMock(...args),
 }));
 
-const { registerOpencodeWaitForTask } = await import("./wait_for_task.js");
+const { registerOpencodeWaitForTask } = await import("../../../src/modules/tools/wait_for_task.js");
 
 describe("opencode_wait_for_task", () => {
   beforeEach(() => {

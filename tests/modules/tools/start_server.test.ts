@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeMcpServer } from "../../test-utils/fake-mcp-server.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const createOpencodeServerMock = vi.fn();
 
@@ -11,8 +11,8 @@ vi.mock("node:crypto", () => ({
   randomUUID: () => "generated-uuid",
 }));
 
-const { registerOpencodeStartServer } = await import("./start_server.js");
-const { getServer, killAllServers } = await import("../shared/server-registry.js");
+const { registerOpencodeStartServer } = await import("../../../src/modules/tools/start_server.js");
+const { getServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
 
 describe("opencode_start_server", () => {
   beforeEach(() => {

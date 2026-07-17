@@ -5,7 +5,7 @@ import {
   type OpencodeServerInstance,
   registerServer,
   removeServer,
-} from "./server-registry.js";
+} from "../../../src/modules/shared/server-registry.js";
 
 function makeInstance(overrides: Partial<OpencodeServerInstance> = {}): OpencodeServerInstance {
   return {

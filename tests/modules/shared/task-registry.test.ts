@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTask, registerTask, removeTask, type TaskRecord } from "./task-registry.js";
+import { getTask, registerTask, removeTask, type TaskRecord } from "../../../src/modules/shared/task-registry.js";
 
 function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {

@@ -15,31 +15,96 @@ OpenCode SDK / CLI
 Subagents
 ```
 
-## Status
-
-Functional. All tools are wired to real OpenCode instances via `@opencode-ai/sdk` (`createOpencodeServer` / `createOpencodeClient`), covered by a Vitest suite. The server also installs `SIGHUP`/`SIGINT`/`SIGTERM`/`exit` handlers so no `opencode serve` child process outlives the MCP process.
-
 ## Design
 
 Task delegation is **asynchronous**: starting a task returns immediately with a `task_id` instead of blocking until the subagent finishes. This lets Claude Code fire multiple `opencode_start_task` calls in parallel — each one opens an isolated OpenCode `Session` — without hitting MCP client timeouts on long-running work. Status and results are fetched separately via polling.
 
 ## Tools
 
-| Tool | Description |
-| --- | --- |
-| `opencode_start_server` | Start (or attach to) an OpenCode server instance |
-| `opencode_stop_server` | Stop a running OpenCode server instance |
-| `opencode_list_agents` | List agents/models available on a server instance |
-| `opencode_start_task` | Delegate a task to an agent by starting a new session and prompt |
-| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`) |
-| `opencode_get_task_result` | Fetch the final result of a completed task |
-| `opencode_wait_for_task` | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses |
+| Tool                       | Description                                                                                               |
+| -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `opencode_start_server`    | Start (or attach to) an OpenCode server instance                                                          |
+| `opencode_stop_server`     | Stop a running OpenCode server instance                                                                   |
+| `opencode_list_agents`     | List agents/models available on a server instance                                                         |
+| `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt                                          |
+| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`)                      |
+| `opencode_get_task_result` | Fetch the final result of a completed task                                                                |
+| `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses |
 
-## Prompts
 
-| Prompt | Description |
-| --- | --- |
+| Prompt          | Description                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
 | `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow) |
+
+## Installation
+
+### Prerequisites
+
+- **Node.js 18+**
+- **[OpenCode](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
+
+### Option 1 — npm (recommended)
+
+The package is published as [`mcp-server-opencode`](https://www.npmjs.com/package/mcp-server-opencode). No cloning or building needed — point your MCP host at `npx`:
+
+For **Claude Code**, one command does it:
+
+```bash
+claude mcp add opencode -- npx -y mcp-server-opencode
+```
+
+Or manually
+
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-opencode"]
+    }
+  }
+}
+```
+
+Or install it globally and use the binary directly:
+
+```bash
+npm install -g mcp-server-opencode
+```
+
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "opencode-mcp"
+    }
+  }
+}
+```
+
+### Option 2 — from source
+
+```bash
+git clone https://github.com/alejandro-technology/opencode-mcp.git
+cd opencode-mcp
+pnpm install
+pnpm build
+```
+
+Then point your MCP host at the built entrypoint:
+
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "node",
+      "args": ["/path/to/opencode-mcp/build/src/index.js"]
+    }
+  }
+}
+```
+
+Restart your MCP host after editing the config; the `opencode_*` tools should appear in its tool list.
 
 ## Configuration
 
@@ -70,7 +135,10 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
     "mcpServers": {
       "opencode": {
         "command": "node",
-        "args": ["/path/to/opencode-mcp/build/src/index.js", "MCP_TOOL_TIMEOUT=1200000"]
+        "args": [
+          "/path/to/opencode-mcp/build/src/index.js",
+          "MCP_TOOL_TIMEOUT=1200000"
+        ]
       }
     }
   }
@@ -78,7 +146,7 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
 
 If both are present, the **environment variable takes precedence** over the CLI argument. Invalid or non-numeric values fall back to the 300000 ms default.
 
-Note that raising this value only raises the server-side clamp — the MCP *client's* own tool-call timeout (e.g. Claude Code's) must also be set to a value **greater than or equal to** this max, or the client will abort the call before `opencode_wait_for_task` has a chance to return.
+Note that raising this value only raises the server-side clamp — the MCP _client's_ own tool-call timeout (e.g. Claude Code's) must also be set to a value **greater than or equal to** this max, or the client will abort the call before `opencode_wait_for_task` has a chance to return.
 
 ## Project structure
 
@@ -113,17 +181,4 @@ pnpm test:coverage  # vitest run --coverage
 pnpm lint           # biome check
 pnpm lint:write     # biome check --write
 pnpm build          # clean tsc build to ./build (also the typecheck)
-```
-
-To use it from an MCP host, build and point the host at the executable entrypoint:
-
-```json
-{
-  "mcpServers": {
-    "opencode": {
-      "command": "node",
-      "args": ["/path/to/opencode-mcp/build/src/index.js"]
-    }
-  }
-}
 ```
