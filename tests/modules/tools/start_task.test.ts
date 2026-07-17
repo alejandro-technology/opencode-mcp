@@ -6,7 +6,9 @@ vi.mock("node:crypto", () => ({
 }));
 
 const { registerOpencodeStartTask } = await import("../../../src/modules/tools/start_task.js");
-const { registerServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
+const { registerServer, killAllServers } = await import(
+  "../../../src/modules/shared/server-registry.js"
+);
 
 describe("opencode_start_task", () => {
   beforeEach(() => {

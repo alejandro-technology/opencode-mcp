@@ -12,7 +12,9 @@ vi.mock("node:crypto", () => ({
 }));
 
 const { registerOpencodeStartServer } = await import("../../../src/modules/tools/start_server.js");
-const { getServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
+const { getServer, killAllServers } = await import(
+  "../../../src/modules/shared/server-registry.js"
+);
 
 describe("opencode_start_server", () => {
   beforeEach(() => {

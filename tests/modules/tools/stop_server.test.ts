@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
-import { getServer, killAllServers, registerServer } from "../../../src/modules/shared/server-registry.js";
+import {
+  getServer,
+  killAllServers,
+  registerServer,
+} from "../../../src/modules/shared/server-registry.js";
 import { registerOpencodeStopServer } from "../../../src/modules/tools/stop_server.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 describe("opencode_stop_server", () => {
   beforeEach(() => {

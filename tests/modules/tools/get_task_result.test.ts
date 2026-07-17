@@ -9,7 +9,9 @@ vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   lastAssistantEntry: (...args: unknown[]) => lastAssistantEntryMock(...args),
 }));
 
-const { registerOpencodeGetTaskResult } = await import("../../../src/modules/tools/get_task_result.js");
+const { registerOpencodeGetTaskResult } = await import(
+  "../../../src/modules/tools/get_task_result.js"
+);
 
 describe("opencode_get_task_result", () => {
   beforeEach(() => {

@@ -8,7 +8,9 @@ vi.mock("@opencode-ai/sdk", () => ({
 }));
 
 const { registerOpencodeListAgents } = await import("../../../src/modules/tools/list_agents.js");
-const { registerServer, killAllServers } = await import("../../../src/modules/shared/server-registry.js");
+const { registerServer, killAllServers } = await import(
+  "../../../src/modules/shared/server-registry.js"
+);
 
 function mockClient({
   agents = { data: [] },
