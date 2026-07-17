@@ -2,6 +2,8 @@ export interface TaskRecord {
   taskId: string;
   serverId: string;
   sessionId: string;
+  /** Epoch ms when the task was started; used to detect tasks that never produced output. */
+  createdAt?: number;
 }
 
 const tasks = new Map<string, TaskRecord>();

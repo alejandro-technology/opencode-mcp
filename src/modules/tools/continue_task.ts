@@ -30,7 +30,7 @@ export function registerOpencodeContinueTask(server: McpServer) {
           .string()
           .optional()
           .describe(
-            "Model override as 'providerID/modelID' (e.g. 'opencode/glm-5.2'). Overrides the agent's pre-assigned model for this follow-up only. Discover available models with opencode_list_agents",
+            "Model override as 'providerID/modelID' (e.g. 'opencode-go/glm-5.2'). Overrides the agent's pre-assigned model for this follow-up only. Discover available models with opencode_list_agents",
           ),
       },
     },

@@ -12,6 +12,7 @@ import {
   clientForTask,
   deriveTaskStatus,
   lastAssistantEntry,
+  PENDING_STALL_MS,
 } from "../../../src/modules/shared/opencode-client.js";
 import { killAllServers, registerServer } from "../../../src/modules/shared/server-registry.js";
 import { registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
@@ -135,6 +136,42 @@ describe("deriveTaskStatus", () => {
     };
     const result = await deriveTaskStatus(client as never, "s1", "task-1");
     expect(result).toEqual({ task_id: "task-1", status: "pending" });
+  });
+
+  it("returns pending for a recently started task with no assistant entry", async () => {
+    registerTask({ taskId: "task-fresh", serverId: "srv", sessionId: "s1", createdAt: Date.now() });
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        messages: vi.fn().mockResolvedValue({ data: [] }),
+      },
+    };
+    const result = await deriveTaskStatus(client as never, "s1", "task-fresh");
+    expect(result).toEqual({ task_id: "task-fresh", status: "pending" });
+    removeTask("task-fresh");
+  });
+
+  it("returns failed when an idle task has no assistant entry past the stall window", async () => {
+    registerTask({
+      taskId: "task-stalled",
+      serverId: "srv",
+      sessionId: "s1",
+      createdAt: Date.now() - PENDING_STALL_MS - 1,
+    });
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        messages: vi.fn().mockResolvedValue({ data: [] }),
+      },
+    };
+    const result = await deriveTaskStatus(client as never, "s1", "task-stalled");
+    expect(result).toEqual({
+      task_id: "task-stalled",
+      status: "failed",
+      error:
+        "task produced no output after starting; the prompt was likely rejected (e.g. invalid model or agent)",
+    });
+    removeTask("task-stalled");
   });
 
   it("returns failed when the assistant entry has an error", async () => {

@@ -69,6 +69,125 @@ describe("opencode_start_task", () => {
     expect(result2).toMatchObject({ isError: true });
   });
 
+  it("returns unknown_model when the provider is not on the server", async () => {
+    vi.doMock("@opencode-ai/sdk", () => ({
+      createOpencodeClient: () => ({
+        session: { create: vi.fn(), promptAsync: vi.fn() },
+        config: {
+          providers: vi.fn().mockResolvedValue({
+            data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
+          }),
+        },
+      }),
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    registry.registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    mod.registerOpencodeStartTask(fake.server);
+    const handler = fake.getHandler();
+
+    const result = await handler({
+      server_id: "srv-1",
+      prompt: "hi",
+      model: "opencode/minimax-m3",
+    });
+
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            server_id: "srv-1",
+            status: "unknown_model",
+            model: "opencode/minimax-m3",
+            message:
+              "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents (or from available_models below) instead of guessing",
+            available_models: ["opencode-go/minimax-m3"],
+          }),
+        },
+      ],
+    });
+    vi.doUnmock("@opencode-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("returns unknown_model when the model is missing from a known provider", async () => {
+    vi.doMock("@opencode-ai/sdk", () => ({
+      createOpencodeClient: () => ({
+        session: { create: vi.fn(), promptAsync: vi.fn() },
+        config: {
+          providers: vi.fn().mockResolvedValue({
+            data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
+          }),
+        },
+      }),
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    registry.registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    mod.registerOpencodeStartTask(fake.server);
+    const handler = fake.getHandler();
+
+    const result = await handler({ server_id: "srv-1", prompt: "hi", model: "opencode-go/nope" });
+
+    expect(result).toMatchObject({ isError: true });
+    expect(JSON.parse((result as { content: { text: string }[] }).content[0].text)).toMatchObject({
+      status: "unknown_model",
+      model: "opencode-go/nope",
+    });
+    vi.doUnmock("@opencode-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("skips model validation when the provider catalog is unavailable", async () => {
+    vi.doMock("@opencode-ai/sdk", () => ({
+      createOpencodeClient: () => ({
+        session: {
+          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+          promptAsync: vi.fn().mockResolvedValue({}),
+        },
+        config: {
+          providers: vi.fn().mockResolvedValue({ error: { message: "boom" } }),
+        },
+      }),
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    registry.registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    mod.registerOpencodeStartTask(fake.server);
+    const handler = fake.getHandler();
+
+    const result = await handler({ server_id: "srv-1", prompt: "hi", model: "any/model" });
+
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining('"status":"pending"') }],
+    });
+    vi.doUnmock("@opencode-ai/sdk");
+    vi.resetModules();
+  });
+
   it("returns an error when session creation fails to yield an id", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
     vi.doMock("@opencode-ai/sdk", () => ({
@@ -119,6 +238,13 @@ describe("opencode_start_task", () => {
           create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
           promptAsync: vi.fn().mockResolvedValue({}),
         },
+        config: {
+          providers: vi.fn().mockResolvedValue({
+            data: {
+              providers: [{ id: "anthropic", models: { "claude-sonnet-4": {} } }],
+            },
+          }),
+        },
       }),
     }));
     vi.resetModules();
@@ -159,6 +285,7 @@ describe("opencode_start_task", () => {
       taskId: "generated-task-id",
       serverId: "srv-1",
       sessionId: "session-1",
+      createdAt: expect.any(Number),
     });
     vi.doUnmock("@opencode-ai/sdk");
     vi.resetModules();

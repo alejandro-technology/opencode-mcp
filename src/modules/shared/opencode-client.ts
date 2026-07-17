@@ -68,6 +68,12 @@ export interface TaskStatusResult {
 
 const TEXT_SNIPPET_MAX_LENGTH = 500;
 
+/**
+ * How long an idle session may stay without any assistant message before the
+ * task is considered dead (e.g. the fire-and-forget prompt was rejected).
+ */
+export const PENDING_STALL_MS = 15_000;
+
 /** Build a TaskProgress summary from a message's parts. */
 export function buildProgress(parts: Part[]): TaskProgress {
   let text = "";
@@ -133,6 +139,18 @@ export async function deriveTaskStatus(
   // Not busy: inspect the last assistant message to tell pending from done.
   const entry = await lastAssistantEntry(client, sessionId);
   if (!entry) {
+    // Idle session with no assistant output: either the prompt was just accepted,
+    // or it was silently rejected (fire-and-forget) and will never run. Past the
+    // stall window, report failure instead of leaving the task pending forever.
+    const task = getTask(taskId);
+    if (task?.createdAt !== undefined && Date.now() - task.createdAt > PENDING_STALL_MS) {
+      return {
+        task_id: taskId,
+        status: "failed",
+        error:
+          "task produced no output after starting; the prompt was likely rejected (e.g. invalid model or agent)",
+      };
+    }
     return { task_id: taskId, status: "pending" };
   }
   if (entry.info.error) {

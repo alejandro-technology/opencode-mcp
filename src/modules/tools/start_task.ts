@@ -31,7 +31,7 @@ export function registerOpencodeStartTask(server: McpServer) {
           .string()
           .optional()
           .describe(
-            "Model override as 'providerID/modelID' (e.g. 'opencode/glm-5.2'). Overrides the agent's pre-assigned model for this task only. Discover available models with opencode_list_agents; see the delegate_task prompt for guidance on matching model tier to task difficulty",
+            "Model override as 'providerID/modelID', copied verbatim from opencode_list_agents output — never guess or construct the id from a model's display name. Overrides the agent's pre-assigned model for this task only. An unknown model is rejected with status 'unknown_model' and the list of available models",
           ),
       },
     },
@@ -54,6 +54,30 @@ export function registerOpencodeStartTask(server: McpServer) {
       }
 
       try {
+        if (parsedModel) {
+          const requested = parsedModel;
+          // Validate against the server's real provider/model catalog: promptAsync is
+          // fire-and-forget, so an unknown model would otherwise fail silently and the
+          // task would look stuck forever. Skip validation if the catalog is unavailable.
+          const providersRes = await client.config.providers();
+          const providers = providersRes.data?.providers;
+          if (providers) {
+            const provider = providers.find((p) => p.id === requested.providerID);
+            if (!provider || !(requested.modelID in provider.models)) {
+              return jsonError({
+                server_id,
+                status: "unknown_model",
+                model,
+                message:
+                  "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents (or from available_models below) instead of guessing",
+                available_models: providers.flatMap((p) =>
+                  Object.keys(p.models).map((m) => `${p.id}/${m}`),
+                ),
+              });
+            }
+          }
+        }
+
         const created = await client.session.create({ body: { title: prompt.slice(0, 60) } });
         const sessionId = created.data?.id;
         if (!sessionId) {
@@ -72,7 +96,7 @@ export function registerOpencodeStartTask(server: McpServer) {
         });
 
         const taskId = randomUUID();
-        registerTask({ taskId, serverId: server_id, sessionId });
+        registerTask({ taskId, serverId: server_id, sessionId, createdAt: Date.now() });
 
         return jsonResult({
           task_id: taskId,

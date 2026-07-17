@@ -1,8 +1,8 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-
 export const DELEGATE_TASK_INSTRUCTIONS = `You have access to the opencode-mcp server, which lets you delegate work to OpenCode agents. Follow this workflow whenever you delegate tasks:
 
 Model selection guide — pick the model per task via the optional "model" input of opencode_start_task ('providerID/modelID'). Match the model tier to the task's difficulty; do not burn a scarce frontier model on work a cheap model handles well. Usage quotas (requests per 5h) are noted as a scarcity signal — lower quota means reserve it for harder work.
+
+IMPORTANT — model IDs: the display names below are NOT model IDs. Never guess or construct a 'providerID/modelID' string from a display name. Always copy the exact provider id and model id verbatim from opencode_list_agents output (models.providers[].provider + '/' + an entry of its models list). The same model may be exposed under different providers (e.g. 'opencode-go/minimax-m3' vs 'opencode/some-other-model'), so the provider prefix cannot be inferred. If opencode_start_task returns status "unknown_model", pick a model from the available_models list it returns instead of retrying a guessed id.
 
 Frontier tier (scarce — architecture, hard debugging, critical decisions):
 - Grok 4.5 (~80 req/5h): top-end reasoning and coding; reserve for the hardest problems, cross-cutting refactors, and tasks where a wrong answer is expensive.
@@ -26,8 +26,8 @@ Rule of thumb: exploration/mechanical → Fast tier; standard implementation →
 
 Workflow:
 1. Ensure an OpenCode server is running. If you don't already have a server_id from a previous opencode_start_server call, call opencode_start_server first.
-2. Call opencode_list_agents with the server_id to discover the available agents (native and custom) and models. Agents may have a pre-assigned model ("provider/model"); you can still override it per task.
-3. For each task, call opencode_start_task with the server_id and the task's prompt. Optionally pass an agent name and/or a model override. Collect the returned task_id for every call.
+2. Call opencode_list_agents with the server_id to discover the available agents (native and custom) and the exact model ids. Agents may have a pre-assigned model ("provider/model"); you can still override it per task.
+3. For each task, call opencode_start_task with the server_id and the task's prompt. Optionally pass an agent name and/or a model override copied verbatim from opencode_list_agents — never a guessed id. Collect the returned task_id for every call.
 4. Wait for completion with opencode_wait_for_task:
    - Single task: mode "all" with the single task_id.
    - Multiple tasks, incremental results: call it repeatedly with mode "any", removing completed task_ids each time.
@@ -36,25 +36,3 @@ Workflow:
 6. Use opencode_get_task_status only for quick, non-blocking checks on a task's progress (e.g. to report status to the user) — it does not replace opencode_wait_for_task or opencode_get_task_result.
 
 Do not call opencode_get_task_result before the task has finished, and prefer opencode_wait_for_task over polling opencode_get_task_status in a loop.`;
-
-export function registerDelegateTaskResource(server: McpServer) {
-  server.registerResource(
-    "delegate-task-instructions",
-    "opencode://instructions/delegate-task",
-    {
-      title: "Delegate task to OpenCode",
-      description:
-        "Instructions for the correct workflow to delegate tasks to OpenCode agents via this MCP server",
-      mimeType: "text/plain",
-    },
-    () => ({
-      contents: [
-        {
-          uri: "opencode://instructions/delegate-task",
-          text: DELEGATE_TASK_INSTRUCTIONS,
-          mimeType: "text/plain",
-        },
-      ],
-    }),
-  );
-}
