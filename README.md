@@ -4,7 +4,44 @@
 [![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/alejandro-technology/opencode-mcp/blob/main/vitest.config.ts)
 [![npm](https://img.shields.io/npm/v/mcp-server-opencode)](https://www.npmjs.com/package/mcp-server-opencode)
 
-An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, Codex CLI, Cursor, etc. — drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
+An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, Codex, Cursor, etc. — drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
+
+## Quick install
+
+Requires **Node.js 18+** and **[OpenCode](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
+
+For **Claude Code**:
+
+```bash
+claude mcp add opencode -- npx -y mcp-server-opencode
+```
+
+For **Codex**:
+```bash
+codex mcp add opencode -- npx -y mcp-server-opencode
+```
+
+See [Installation](#installation) for manual config, and from-source options.
+
+## Tools
+
+| Tool                       | Description                                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `opencode_start_server`    | Start (or attach to) an OpenCode server instance                                                          |
+| `opencode_stop_server`     | Stop a running OpenCode server instance                                                                   |
+| `opencode_list_agents`     | List agents/models available on a server instance                                                         |
+| `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt (optional `agent` / `model` override)    |
+| `opencode_continue_task`   | Send a follow-up prompt to an existing task's session for iterative back-and-forth with the subagent      |
+| `opencode_cancel_task`     | Abort a running delegated task by cancelling its session                                                  |
+| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`); optional `include_progress` adds a partial output snippet and the currently running tool while it's still running |
+| `opencode_get_task_result` | Fetch the final result of a completed task                                                                |
+| `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses; optional `include_progress` enriches any still-unfinished tasks in the final result with a partial output snippet and the currently running tool |
+
+| Prompt          | Description                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow), including a model selection guide that maps each OpenCode model tier to the task difficulty it should handle |
+
+## How it works
 
 ```
 Claude Code
@@ -19,28 +56,7 @@ OpenCode SDK / CLI
 Subagents
 ```
 
-## Design
-
 Task delegation is **asynchronous**: starting a task returns immediately with a `task_id` instead of blocking until the subagent finishes. This lets Claude Code fire multiple `opencode_start_task` calls in parallel — each one opens an isolated OpenCode `Session` — without hitting MCP client timeouts on long-running work. Status and results are fetched separately via polling.
-
-## Tools
-
-| Tool                       | Description                                                                                               |
-| -------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `opencode_start_server`    | Start (or attach to) an OpenCode server instance                                                          |
-| `opencode_stop_server`     | Stop a running OpenCode server instance                                                                   |
-| `opencode_list_agents`     | List agents/models available on a server instance                                                         |
-| `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt (optional `agent` / `model` override)    |
-| `opencode_continue_task`   | Send a follow-up prompt to an existing task's session for iterative back-and-forth with the subagent      |
-| `opencode_cancel_task`     | Abort a running delegated task by cancelling its session                                                  |
-| `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`); optional `include_progress` adds a partial output snippet and the currently running tool while it's still running |
-| `opencode_get_task_result` | Fetch the final result of a completed task                                                                |
-| `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses; optional `include_progress` enriches any still-unfinished tasks in the final result with a partial output snippet and the currently running tool |
-
-
-| Prompt          | Description                                                                                          |
-| --------------- | ---------------------------------------------------------------------------------------------------- |
-| `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow), including a model selection guide that maps each OpenCode model tier to the task difficulty it should handle |
 
 ## Installation
 
@@ -72,7 +88,7 @@ Or manually
 }
 ```
 
-For **Codex CLI**, add the server to `~/.codex/config.toml`:
+For **Codex**, add the server to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.opencode]
@@ -160,9 +176,9 @@ Restart your MCP host after editing the config; the `opencode_*` tools should ap
 
 If both are present, the **environment variable takes precedence** over the CLI argument. Invalid or non-numeric values fall back to the 300000 ms default.
 
-Note that raising this value only raises the server-side clamp — the MCP _client's_ own tool-call timeout (e.g. Claude Code's) must also be set to a value **greater than or equal to** this max, or the client will abort the call before `opencode_wait_for_task` has a chance to return.
+## Development
 
-## Project structure
+### Project structure
 
 ```
 src/
@@ -180,7 +196,7 @@ src/
 
 Each module ships with a `*.test.ts` Vitest suite under the parallel `tests/` tree mirroring `src/`.
 
-## Getting started
+### Getting started
 
 ```bash
 pnpm install

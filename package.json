@@ -27,7 +27,7 @@
   "bugs": {
     "url": "https://github.com/alejandro-technology/opencode-mcp/issues"
   },
-  "homepage": "https://github.com/alejandro-technology/opencode-mcp",
+  "homepage": "https://opencode-mcp.alejandrotechnology.com",
   "publishConfig": {
     "access": "public"
   },
