@@ -10,7 +10,6 @@ Frontier tier (scarce — architecture, hard debugging, critical decisions):
 
 High tier (strong daily drivers — feature implementation, non-trivial debugging, review):
 - GLM-5.2 (~880 req/5h): open-weight leader on coding and agentic-coding benchmarks (SWE-bench Pro ~62%); best default for substantial implementation and refactoring work.
-- Qwen3.7 Max (~950 req/5h): near-tie with GLM-5.2 on real-world software engineering; strong multilingual and long-context work.
 - Kimi K2.7 Code (~1,150 req/5h): coding-specialized; ~30% fewer thinking tokens, excellent precise tool invocation (MCP-heavy pipelines) and 4,000+ tool-call sequences; best for long agentic coding runs.
 
 Mid tier (high volume — standard features, tests, medium complexity):
