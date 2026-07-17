@@ -16,7 +16,7 @@ describe("registerDelegateTaskPrompt", () => {
     expect(config).not.toHaveProperty("argsSchema");
   });
 
-  it("returns static workflow instructions with the recommended models", () => {
+  it("returns static workflow instructions with the model selection guide", () => {
     const { server, getPromptHandler } = createFakeMcpServer();
     registerDelegateTaskPrompt(server);
     const handler = getPromptHandler<() => { messages: unknown[] }>();
@@ -25,7 +25,9 @@ describe("registerDelegateTaskPrompt", () => {
     const text = (result.messages[0] as { content: { text: string } }).content.text;
 
     expect(result.messages).toHaveLength(1);
-    expect(text).toContain("Fable 5, Opus 4.8, or GPT 5.6 Sol");
+    expect(text).toContain("Model selection guide");
+    expect(text).toContain("Frontier tier");
+    expect(text).toContain("Fast tier");
     expect(text).toContain("opencode_start_server");
     expect(text).toContain("opencode_list_agents");
     expect(text).toContain("opencode_start_task");

@@ -1,10 +1,23 @@
 {
   "name": "mcp-server-opencode",
   "version": "1.0.0",
-  "description": "",
+  "description": "MCP server that lets any MCP host (Claude Code, Codex CLI, Cursor, etc.) drive OpenCode and delegate tasks asynchronously to its agents",
   "main": "./build/src/index.js",
   "types": "./build/src/index.d.ts",
-  "keywords": [],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "opencode",
+    "agent",
+    "subagent",
+    "delegation",
+    "async",
+    "orchestration",
+    "claude-code",
+    "codex",
+    "ai-agents"
+  ],
   "author": "alejandro-technology",
   "license": "MIT",
   "repository": {

@@ -2,7 +2,28 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const DELEGATE_TASK_INSTRUCTIONS = `You have access to the opencode-mcp server, which lets you delegate work to OpenCode agents. Follow this workflow whenever you delegate tasks:
 
-Recommended models: run delegated tasks with Fable 5, Opus 4.8, or GPT 5.6 Sol. When overriding an agent's model via opencode_start_task, prefer one of these.
+Model selection guide — pick the model per task via the optional "model" input of opencode_start_task ('providerID/modelID'). Match the model tier to the task's difficulty; do not burn a scarce frontier model on work a cheap model handles well. Usage quotas (requests per 5h) are noted as a scarcity signal — lower quota means reserve it for harder work.
+
+Frontier tier (scarce — architecture, hard debugging, critical decisions):
+- Grok 4.5 (~80 req/5h): top-end reasoning and coding; reserve for the hardest problems, cross-cutting refactors, and tasks where a wrong answer is expensive.
+- Kimi K3 (~140 req/5h): frontier reasoning with very strong agentic stability and tool calling over long sessions; best for long-horizon multi-step tasks that must not derail.
+
+High tier (strong daily drivers — feature implementation, non-trivial debugging, review):
+- GLM-5.2 (~880 req/5h): open-weight leader on coding and agentic-coding benchmarks (SWE-bench Pro ~62%); best default for substantial implementation and refactoring work.
+- Qwen3.7 Max (~950 req/5h): near-tie with GLM-5.2 on real-world software engineering; strong multilingual and long-context work.
+- Kimi K2.7 Code (~1,150 req/5h): coding-specialized; ~30% fewer thinking tokens, excellent precise tool invocation (MCP-heavy pipelines) and 4,000+ tool-call sequences; best for long agentic coding runs.
+
+Mid tier (high volume — standard features, tests, medium complexity):
+- MiniMax M3 (~3,200 req/5h): frontier-adjacent coding plus 1M context and native multimodality; best for large-codebase context ingestion or tasks involving images/video.
+- MiMo-V2.5-Pro (~3,250 req/5h): strong general agentic capability and complex software engineering (high SWE-bench Pro rankings); good GLM alternative at higher volume.
+- DeepSeek V4 Pro (~3,450 req/5h): solid all-round flagship; good balance of capability and quota for everyday implementation tasks.
+- Qwen3.7 Plus (~4,300 req/5h): capable mid-range generalist; good for standard features and tests at volume.
+
+Fast tier (near-unlimited — mechanical work, boilerplate, formatting, simple fixes, docs, exploration):
+- MiMo-V2.5 (~30,100 req/5h): lightweight reasoning model; better than Flash on agentic tasks, at some latency/token cost.
+- DeepSeek V4 Flash (~31,650 req/5h): cheapest and fastest, non-reasoning; best for mechanical edits, boilerplate, renames, doc updates, and quick lookups where latency matters.
+
+Rule of thumb: exploration/mechanical → Fast tier; standard implementation → Mid tier; complex features and long agentic runs → High tier; architecture or hardest debugging → Frontier tier.
 
 Workflow:
 1. Ensure an OpenCode server is running. If you don't already have a server_id from a previous opencode_start_server call, call opencode_start_server first.

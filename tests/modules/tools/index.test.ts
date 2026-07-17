@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 import { registerTools } from "../../../src/modules/tools/index.js";
+import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 describe("registerTools", () => {
   it("registers every opencode tool", () => {
@@ -17,6 +17,8 @@ describe("registerTools", () => {
       "opencode_get_task_status",
       "opencode_get_task_result",
       "opencode_wait_for_task",
+      "opencode_continue_task",
+      "opencode_cancel_task",
     ]);
   });
 });

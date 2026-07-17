@@ -1,6 +1,6 @@
 # opencode-mcp
 
-An MCP (Model Context Protocol) server that lets Claude Code drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
+An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, Codex CLI, Cursor, etc. — drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
 
 ```
 Claude Code
@@ -26,7 +26,9 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
 | `opencode_start_server`    | Start (or attach to) an OpenCode server instance                                                          |
 | `opencode_stop_server`     | Stop a running OpenCode server instance                                                                   |
 | `opencode_list_agents`     | List agents/models available on a server instance                                                         |
-| `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt                                          |
+| `opencode_start_task`      | Delegate a task to an agent by starting a new session and prompt (optional `agent` / `model` override)    |
+| `opencode_continue_task`   | Send a follow-up prompt to an existing task's session for iterative back-and-forth with the subagent      |
+| `opencode_cancel_task`     | Abort a running delegated task by cancelling its session                                                  |
 | `opencode_get_task_status` | Poll the status of a delegated task (`pending` / `running` / `completed` / `failed`)                      |
 | `opencode_get_task_result` | Fetch the final result of a completed task                                                                |
 | `opencode_wait_for_task`   | Long-poll one or more delegated tasks until they finish (`mode: "all"` or `"any"`) or the timeout elapses |
@@ -34,7 +36,7 @@ Task delegation is **asynchronous**: starting a task returns immediately with a 
 
 | Prompt          | Description                                                                                          |
 | --------------- | ---------------------------------------------------------------------------------------------------- |
-| `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow) |
+| `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow), including a model selection guide that maps each OpenCode model tier to the task difficulty it should handle |
 
 ## Installation
 
@@ -64,6 +66,14 @@ Or manually
     }
   }
 }
+```
+
+For **Codex CLI**, add the server to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.opencode]
+command = "npx"
+args = ["-y", "mcp-server-opencode"]
 ```
 
 Or install it globally and use the binary directly:

@@ -1,5 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 // Tools
+import { registerOpencodeCancelTask } from "./cancel_task.js";
+import { registerOpencodeContinueTask } from "./continue_task.js";
 import { registerOpencodeGetTaskResult } from "./get_task_result.js";
 import { registerOpencodeGetTaskStatus } from "./get_task_status.js";
 import { registerOpencodeListAgents } from "./list_agents.js";
@@ -16,4 +18,6 @@ export function registerTools(server: McpServer) {
   registerOpencodeGetTaskStatus(server);
   registerOpencodeGetTaskResult(server);
   registerOpencodeWaitForTask(server);
+  registerOpencodeContinueTask(server);
+  registerOpencodeCancelTask(server);
 }

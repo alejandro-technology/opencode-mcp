@@ -23,7 +23,7 @@ Package manager is **pnpm** (only `pnpm-lock.yaml` exists). Scripts call `npx`/`
 
 ## Testing
 
-Every module has a colocated `<name>.test.ts` Vitest suite next to its source. `src/test-utils/fake-mcp-server.ts` provides a fake `McpServer` for testing tool/prompt registration without a real transport. Tests run in a `node` environment; `src/test-utils/` is excluded from coverage. When adding or changing a module, keep its test file at 100% coverage or `pnpm test:coverage` fails.
+Every module has a `<name>.test.ts` Vitest suite under the parallel `tests/` tree mirroring `src/` (e.g. `src/modules/tools/start_task.ts` → `tests/modules/tools/start_task.test.ts`; see `vitest.config.ts` `include`). `src/test-utils/fake-mcp-server.ts` provides a fake `McpServer` for testing tool/prompt registration without a real transport. Tests run in a `node` environment; `src/test-utils/` is excluded from coverage. When adding or changing a module, keep its test file at 100% coverage or `pnpm test:coverage` fails.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ Every module has a colocated `<name>.test.ts` Vitest suite next to its source. `
 2. Register it in `src/modules/tools/index.ts` (import + call inside `registerTools`).
 3. The tool name passed to `server.registerTool` must be `opencode_<name>`; define `inputSchema` with Zod.
 4. Reuse `shared/mcp-result.ts` (`jsonResult`/`jsonError`) for results and `shared/opencode-client.ts` (`clientForServer`/`clientForTask`) for SDK access instead of constructing clients ad hoc — other tools rely on the registries staying the source of truth for server/task identity.
-5. Add a colocated `<name>.test.ts` (use `src/test-utils/fake-mcp-server.ts` to capture the registration) — coverage thresholds are 100%.
+5. Add `tests/modules/tools/<name>.test.ts` (use `src/test-utils/fake-mcp-server.ts` to capture the registration) — coverage thresholds are 100%.
 
 ## Gotchas
 
