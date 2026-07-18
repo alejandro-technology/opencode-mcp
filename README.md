@@ -42,19 +42,7 @@ See [Installation](#installation) for manual config, and from-source options.
 | `delegate_task` | Guides the host through delegating one or more tasks to OpenCode agents (start/wait/result workflow), including a model selection guide that maps each OpenCode model tier to the task difficulty it should handle |
 
 ## How it works
-
-```
-Claude Code
-      │
-      ▼
-MCP Server  (this project)
-      │
-      ▼
-OpenCode SDK / CLI
-      │
-      ▼
-Subagents
-```
+![opencode mcp architecture](./opencode-architecture.svg)
 
 Task delegation is **asynchronous**: starting a task returns immediately with a `task_id` instead of blocking until the subagent finishes. This lets Claude Code fire multiple `opencode_start_task` calls in parallel — each one opens an isolated OpenCode `Session` — without hitting MCP client timeouts on long-running work. Status and results are fetched separately via polling.
 
