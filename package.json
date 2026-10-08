@@ -42,6 +42,7 @@
     "lint:format": "biome format --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "smoke": "pnpm build && node --experimental-strip-types scripts/smoke.ts",
     "build": "rm -rf build && npx tsc && chmod +x build/src/index.js",
     "prepare": "npm run build",
     "publish": "npm publish --access public"

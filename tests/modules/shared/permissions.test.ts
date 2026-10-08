@@ -32,7 +32,7 @@ function ask(overrides: Partial<PermissionAsk> = {}): PermissionAsk {
 
 interface FakeClientOptions {
   messages?: unknown;
-  subscribe?: () => Promise<{ stream: AsyncGenerator<unknown> }>;
+  subscribe?: (options?: { signal?: AbortSignal }) => Promise<{ stream: AsyncGenerator<unknown> }>;
   reply?: (args: unknown) => Promise<unknown>;
 }
 
@@ -490,6 +490,27 @@ describe("startPermissionResponder", () => {
     expect((errors[0] as Error).message).toBe("reply failed");
   });
 
+  it("reports response-level permission reply failures", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    const subscribe = vi.fn(async () => ({
+      stream: streamOf({ type: "permission.asked", properties: ask({ permission: "bash" }) }),
+    }));
+    const { client } = fakeClient({
+      subscribe,
+      reply: async () => ({ error: { message: "HTTP 500" } }),
+    });
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      onError: (error) => errors.push(error),
+      sleep: async () => responder.stop(),
+    });
+    await responder.done;
+
+    expect(errors).toEqual([{ message: "HTTP 500" }]);
+  });
+
   it("swallows errors and decisions when no callbacks are supplied", async () => {
     let responder!: PermissionResponder;
     const subscribe = vi
@@ -545,6 +566,51 @@ describe("startPermissionResponder", () => {
 
     if (original === undefined) delete process.env.OPENCODE_MCP_EXTERNAL_DIR;
     else process.env.OPENCODE_MCP_EXTERNAL_DIR = original;
+  });
+
+  it("answers only permission events for dynamically allowed session IDs", async () => {
+    let responder!: PermissionResponder;
+    let receivedSignal: AbortSignal | undefined;
+    const subscribe = vi.fn(async (options?: { signal?: AbortSignal }) => {
+      receivedSignal = options?.signal;
+      return {
+        stream: streamOf(
+          { type: "permission.asked", properties: ask({ sessionID: "unowned" }) },
+          { type: "permission.asked", properties: ask({ sessionID: "ses_1" }) },
+        ),
+      };
+    });
+    const { client, replies } = fakeClient({ subscribe });
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      allowedSessionIDs: () => new Set(["ses_1"]),
+      onDecision: () => responder.stop(),
+    });
+    await responder.done;
+    expect(subscribe).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) });
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(replies).toEqual([
+      { path: { id: "ses_1", permissionID: "per_1" }, body: { response: "always" } },
+    ]);
+  });
+
+  it("aborts a blocked event subscription immediately when stopped", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const subscribe = vi.fn((options?: { signal?: AbortSignal }) => {
+      const signal = options?.signal;
+      receivedSignal = signal;
+      if (!signal) throw new Error("responder omitted abort signal");
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    const { client, replies } = fakeClient({ subscribe });
+    const responder = startPermissionResponder(client, { policy: "allow" });
+    await Promise.resolve();
+    responder.stop();
+    await responder.done;
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(replies).toEqual([]);
   });
 });
 

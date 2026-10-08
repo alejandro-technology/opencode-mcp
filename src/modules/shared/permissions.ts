@@ -218,6 +218,8 @@ export interface PermissionResponderOptions {
   /** Called after each answered request; useful for diagnostics and tests. */
   onDecision?: (ask: PermissionAsk, decision: PermissionDecision) => void;
   sleep?: (ms: number) => Promise<void>;
+  /** Dynamic allow-list; the root responder must not answer unrelated sessions. */
+  allowedSessionIDs?: () => ReadonlySet<string>;
 }
 
 export interface PermissionResponder {
@@ -245,32 +247,51 @@ export function startPermissionResponder(
   const onError = options.onError ?? (() => {});
   const onDecision = options.onDecision ?? (() => {});
   const sleep = options.sleep ?? defaultSleep;
+  const allowedSessionIDs = options.allowedSessionIDs;
+  const controller = new AbortController();
 
   let stopped = false;
   const stop = () => {
     stopped = true;
+    controller.abort(new Error("permission responder stopped"));
   };
+
+  const waitToReconnect = () =>
+    new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        controller.signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      controller.signal.addEventListener("abort", finish, { once: true });
+      void sleep(RECONNECT_DELAY_MS).then(finish, finish);
+    });
 
   const done = (async () => {
     while (!stopped) {
       try {
-        const { stream } = await client.event.subscribe();
+        const { stream } = await client.event.subscribe({ signal: controller.signal });
         for await (const event of stream) {
           if (stopped) return;
           if (!PERMISSION_EVENTS.has(event.type)) continue;
           const ask = event.properties as unknown as PermissionAsk;
+          if (allowedSessionIDs && !allowedSessionIDs().has(ask.sessionID)) continue;
           const decision = await decidePermission(client, ask, policy, sleep);
-          await client.postSessionIdPermissionsPermissionId({
+          const response = await client.postSessionIdPermissionsPermissionId({
             path: { id: ask.sessionID, permissionID: ask.id },
             body: { response: decision.response },
           });
+          if (response.error) throw response.error;
           onDecision(ask, decision);
         }
       } catch (error) {
+        if (stopped) return;
         onError(error);
       }
       if (stopped) return;
-      await sleep(RECONNECT_DELAY_MS);
+      await waitToReconnect();
     }
   })();
 

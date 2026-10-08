@@ -77,32 +77,31 @@ describe("opencode_start_server", () => {
     });
   });
 
-  it("starts a permission responder bound to the new server's url", async () => {
+  it("stores the canonical server directory and enables session-scoped permission responders", async () => {
     createOpencodeServerMock.mockResolvedValue({ url: "http://127.0.0.1:4096", close: vi.fn() });
     const fake = createFakeMcpServer();
     registerOpencodeStartServer(fake.server);
 
     await fake.getHandler()({ port: undefined });
 
-    expect(createOpencodeClientMock).toHaveBeenCalledWith({ baseUrl: "http://127.0.0.1:4096" });
-    expect(startPermissionResponderMock).toHaveBeenCalledWith(
-      { fake: "client" },
-      { policy: "read-only" },
-    );
+    expect(createOpencodeClientMock).not.toHaveBeenCalled();
+    expect(startPermissionResponderMock).not.toHaveBeenCalled();
+    expect(getServer("generated-uuid")).toMatchObject({
+      directory: await import("node:fs/promises").then(({ realpath }) => realpath(process.cwd())),
+      permissionPolicy: "read-only",
+      permissionScopesEnabled: true,
+    });
   });
 
-  it("stops the responder when the registered server is closed", async () => {
+  it("stops registered permission scopes when the server is closed", async () => {
     const close = vi.fn();
-    const stop = vi.fn();
     createOpencodeServerMock.mockResolvedValue({ url: "http://127.0.0.1:4096", close });
-    startPermissionResponderMock.mockReturnValue({ stop, done: Promise.resolve() });
     const fake = createFakeMcpServer();
     registerOpencodeStartServer(fake.server);
 
     await fake.getHandler()({ port: undefined });
     killAllServers();
 
-    expect(stop).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
 

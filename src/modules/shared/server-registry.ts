@@ -2,6 +2,10 @@ export interface OpencodeServerInstance {
   serverId: string;
   baseUrl: string;
   close: () => void;
+  /** Canonical directory inherited by the OpenCode server process. */
+  directory?: string;
+  permissionPolicy?: "read-only" | "allow" | "deny";
+  permissionScopesEnabled?: boolean;
 }
 
 const servers = new Map<string, OpencodeServerInstance>();

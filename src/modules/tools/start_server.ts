@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk";
+import { createOpencodeServer } from "@opencode-ai/sdk";
 import { z } from "zod";
-import {
-  buildServerConfig,
-  getExternalDirectoryPolicy,
-  startPermissionResponder,
-} from "../shared/permissions.js";
+import { stopPermissionScopesForServer } from "../shared/permission-scopes.js";
+import { buildServerConfig, getExternalDirectoryPolicy } from "../shared/permissions.js";
 import { registerServer } from "../shared/server-registry.js";
 
 const DEFAULT_PORT = 4096;
@@ -33,21 +31,15 @@ export function registerOpencodeStartServer(server: McpServer) {
         });
         const serverId = randomUUID();
 
-        // Nothing can approve a permission prompt behind a headless server, so
-        // an unanswered `ask` wedges the agent forever. The responder answers
-        // every request, which is what keeps tasks from hanging indefinitely.
-        const responder = startPermissionResponder(
-          createOpencodeClient({ baseUrl: instance.url }),
-          {
-            policy,
-          },
-        );
-
+        const directory = await realpath(process.cwd());
         registerServer({
           serverId,
           baseUrl: instance.url,
+          directory,
+          permissionPolicy: policy,
+          permissionScopesEnabled: true,
           close: () => {
-            responder.stop();
+            stopPermissionScopesForServer(serverId);
             instance.close();
           },
         });

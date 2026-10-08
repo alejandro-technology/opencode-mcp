@@ -1,3 +1,6 @@
+import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
@@ -124,6 +127,7 @@ describe("opencode_list_agents", () => {
           type: "text",
           text: JSON.stringify({
             server_id: "srv-1",
+            directory: process.cwd(),
             agents: {
               native: [
                 {
@@ -223,12 +227,102 @@ describe("opencode_list_agents", () => {
           type: "text",
           text: JSON.stringify({
             server_id: "srv-1",
+            directory: process.cwd(),
             agents: { native: [], custom: [] },
             models: { defaults: {}, quota_snapshot: null, providers: [] },
           }),
         },
       ],
     });
+  });
+
+  it("binds discovery to the explicitly selected canonical directory", async () => {
+    const directory = await realpath(process.cwd());
+    registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: process.cwd(),
+      close: vi.fn(),
+    });
+    mockClient();
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({ server_id: "srv-1", directory: "." });
+    expect(createOpencodeClientMock).toHaveBeenCalledWith(expect.objectContaining({ directory }));
+    expect(JSON.parse(result.content[0].text).directory).toBe(directory);
+  });
+
+  it("rejects an existing file as a selected project directory", async () => {
+    registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: process.cwd(),
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({
+      server_id: "srv-1",
+      directory: "src/modules/tools/list_agents.ts",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "invalid_directory" });
+  });
+
+  it("reports a missing selected project directory as invalid", async () => {
+    registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: process.cwd(),
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({
+      server_id: "srv-1",
+      directory: "missing-project-directory",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "invalid_directory" });
+  });
+
+  it("reports unexpected canonicalization failures without starting a client", async () => {
+    const root = await mkdtemp(join(tmpdir(), "list-agent-directory-loop-"));
+    const firstLink = join(root, "first");
+    const secondLink = join(root, "second");
+    await symlink(secondLink, firstLink);
+    await symlink(firstLink, secondLink);
+    registerServer({
+      serverId: "srv-1",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: process.cwd(),
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({ server_id: "srv-1", directory: firstLink });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "error" });
+    expect(createOpencodeClientMock).not.toHaveBeenCalled();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("handles a server disappearing while its project client is being built", async () => {
+    vi.doMock("../../../src/modules/shared/opencode-client.js", () => ({
+      clientForServer: () => undefined,
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/list_agents.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.registerServer({
+      serverId: "vanishing-server",
+      baseUrl: "http://localhost",
+      directory: process.cwd(),
+      close: vi.fn(),
+    });
+    const fake = createFakeMcpServer();
+    mod.registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({ server_id: "vanishing-server" });
+    expect(JSON.parse(result.content[0].text).status).toBe("not_found");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
+    vi.resetModules();
   });
 
   it("returns an error result when the agents call reports an object error with a message", async () => {
