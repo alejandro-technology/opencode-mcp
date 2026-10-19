@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-opencode",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "MCP server that lets any MCP host (Claude Code, Codex CLI, Cursor, etc.) drive OpenCode and delegate tasks asynchronously to its agents",
   "main": "./build/src/index.js",
   "types": "./build/src/index.d.ts",
@@ -42,6 +42,7 @@
     "lint:format": "biome format --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "smoke": "pnpm build && node --experimental-strip-types scripts/smoke.ts",
     "build": "rm -rf build && npx tsc && chmod +x build/src/index.js",
     "prepare": "npm run build",
     "publish": "npm publish --access public"

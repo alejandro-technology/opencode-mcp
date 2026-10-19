@@ -12,9 +12,13 @@ import {
   CANCELLED_TASK_MESSAGE,
   clientForServer,
   clientForTask,
+  currentRunEntries,
+  deriveAssistantTurnStatus,
   deriveTaskStatus,
   EMPTY_TURN_MESSAGE,
+  fetchWithDeadline,
   hasWork,
+  isTerminalTaskStatus,
   lastAssistantEntry,
   PENDING_STALL_MS,
   sessionParts,
@@ -41,7 +45,106 @@ describe("clientForServer", () => {
     const client = clientForServer("srv-1");
 
     expect(client).toBe(fakeClient);
-    expect(createOpencodeClientMock).toHaveBeenCalledWith({ baseUrl: "http://127.0.0.1:4096" });
+    expect(createOpencodeClientMock).toHaveBeenCalledWith({
+      baseUrl: "http://127.0.0.1:4096",
+      fetch: expect.any(Function),
+    });
+  });
+
+  it("binds server overrides and task clients to their selected project directories", () => {
+    const fakeClient = { fake: true };
+    createOpencodeClientMock.mockReturnValue(fakeClient);
+    registerServer({
+      serverId: "srv-directory",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: "/server/root",
+      close: vi.fn(),
+    });
+    const runClient = clientForServer("srv-directory", "/worktrees/task-one");
+    expect(runClient).toBe(fakeClient);
+    expect(createOpencodeClientMock).toHaveBeenLastCalledWith({
+      baseUrl: "http://127.0.0.1:4096",
+      fetch: expect.any(Function),
+      directory: "/worktrees/task-one",
+    });
+
+    registerTask({
+      taskId: "directory-task",
+      serverId: "srv-directory",
+      sessionId: "session-1",
+      directory: "/worktrees/task-two/package",
+    });
+    expect(clientForTask("directory-task")).toEqual({ client: fakeClient, sessionId: "session-1" });
+    expect(createOpencodeClientMock).toHaveBeenLastCalledWith({
+      baseUrl: "http://127.0.0.1:4096",
+      fetch: expect.any(Function),
+      directory: "/worktrees/task-two/package",
+    });
+    removeTask("directory-task");
+  });
+});
+
+describe("fetchWithDeadline", () => {
+  it("performs a request and clears its deadline timer", async () => {
+    const response = new Response("ok");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const result = await fetchWithDeadline(new Request("http://localhost"));
+    expect(result).toBe(response);
+    expect(fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it("aborts when the request signal is cancelled", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (request: Request) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+    const pending = fetchWithDeadline(
+      new Request("http://localhost", { signal: controller.signal }),
+    );
+    controller.abort(new Error("caller cancelled"));
+    await expect(pending).rejects.toThrow("caller cancelled");
+    vi.unstubAllGlobals();
+  });
+
+  it("aborts requests that exceed the HTTP deadline", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (request: Request) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+    const pending = fetchWithDeadline(new Request("http://localhost"));
+    const rejection = expect(pending).rejects.toThrow("OpenCode request deadline exceeded");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejection;
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("isTerminalTaskStatus", () => {
+  it.each(["completed", "failed", "empty", "cancelled", "error"])("recognizes %s", (status) => {
+    expect(isTerminalTaskStatus(status)).toBe(true);
+  });
+
+  it("keeps pending and running non-terminal", () => {
+    expect(isTerminalTaskStatus("pending")).toBe(false);
+    expect(isTerminalTaskStatus("running")).toBe(false);
   });
 });
 
@@ -116,12 +219,216 @@ describe("lastAssistantEntry", () => {
 });
 
 describe("deriveTaskStatus", () => {
+  it("surfaces response-level HTTP failures from the session status read", async () => {
+    const client = {
+      session: { status: vi.fn().mockResolvedValue({ error: { message: "HTTP 503" } }) },
+    };
+
+    await expect(deriveTaskStatus(client as never, "s1", "task-1")).rejects.toEqual({
+      message: "HTTP 503",
+    });
+  });
   it("returns running when the session is busy", async () => {
     const client = {
       session: { status: vi.fn().mockResolvedValue({ data: { s1: { type: "busy" } } }) },
     };
     const result = await deriveTaskStatus(client as never, "s1", "task-1");
     expect(result).toEqual({ task_id: "task-1", status: "running" });
+  });
+
+  it("adds run and direct-session usage from the same busy-path message read", async () => {
+    registerTask({
+      taskId: "task-1",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-current",
+      runs: [{ run_id: "run-current", message_id: "msg-current", startedAt: 1 }],
+    });
+    const messages = vi.fn().mockResolvedValue({
+      data: [
+        {
+          info: {
+            role: "assistant",
+            id: "old",
+            parentID: "msg-old",
+            providerID: "p1",
+            modelID: "m1",
+            cost: 0.2,
+            tokens: { input: 8, output: 2, reasoning: 1, cache: { read: 3, write: 0 } },
+          },
+          parts: [],
+        },
+        {
+          info: {
+            role: "assistant",
+            id: "current",
+            parentID: "msg-current",
+            providerID: "p2",
+            modelID: "m2",
+            cost: 0,
+            tokens: { input: 4, output: 1, reasoning: 0, cache: { read: 1, write: 2 } },
+          },
+          parts: [],
+        },
+      ],
+    });
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: { s1: { type: "busy" } } }),
+        messages,
+      },
+    };
+
+    const result = await deriveTaskStatus(client as never, "s1", "task-1", {
+      includeUsage: true,
+    });
+
+    expect(messages).toHaveBeenCalledOnce();
+    expect(result.usage?.report).toMatchObject({
+      run: { message_count: 1, input: { value: 4 }, reported_cost: { value: 0 } },
+      session: { message_count: 2, input: { value: 12 }, reported_cost: { value: 0.2 } },
+    });
+    expect(result.usage?.report?.scope.subagent_sessions_included).toBe(false);
+    removeTask("task-1");
+  });
+
+  it("returns unavailable usage without losing busy status when messages cannot be read", async () => {
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: { s1: { type: "busy" } } }),
+        messages: vi.fn().mockRejectedValue(new Error("read failed")),
+      },
+    };
+    const result = await deriveTaskStatus(client as never, "s1", "task-1", {
+      includeUsage: true,
+    });
+    expect(result).toMatchObject({
+      status: "running",
+      usage: { report: null, diagnostic: "usage unavailable: read failed" },
+    });
+  });
+
+  it("preserves raw non-Error usage read failures in the diagnostic", async () => {
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: { s1: { type: "busy" } } }),
+        messages: vi.fn().mockRejectedValue("raw read failure"),
+      },
+    };
+    const result = await deriveTaskStatus(client as never, "s1", "task-raw-usage", {
+      includeUsage: true,
+    });
+    expect(result.usage?.diagnostic).toBe("usage unavailable: raw read failure");
+  });
+
+  it("uses usage snapshots on idle pending, stalled, and completed paths", async () => {
+    const emptyClient = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        messages: vi.fn().mockResolvedValue({ data: [] }),
+      },
+    };
+    const pending = await deriveTaskStatus(emptyClient as never, "s1", "task-pending-usage", {
+      includeUsage: true,
+    });
+    expect(pending).toMatchObject({
+      status: "pending",
+      usage: { snapshot_kind: "live_observation" },
+    });
+
+    registerTask({
+      taskId: "task-stalled-usage",
+      serverId: "srv",
+      sessionId: "s1",
+      createdAt: Date.now() - PENDING_STALL_MS - 1,
+    });
+    const stalled = await deriveTaskStatus(emptyClient as never, "s1", "task-stalled-usage", {
+      includeUsage: true,
+    });
+    expect(stalled).toMatchObject({
+      status: "failed",
+      usage: { snapshot_kind: "live_observation" },
+    });
+    removeTask("task-stalled-usage");
+
+    const completedClient = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        messages: vi.fn().mockResolvedValue({
+          data: [
+            {
+              info: { role: "assistant", time: { completed: 1 } },
+              parts: [{ type: "text", text: "done" }],
+            },
+          ],
+        }),
+      },
+    };
+    const completed = await deriveTaskStatus(
+      completedClient as never,
+      "s1",
+      "task-completed-usage",
+      { includeUsage: true },
+    );
+    expect(completed).toMatchObject({
+      status: "completed",
+      usage: { snapshot_kind: "live_observation" },
+    });
+  });
+
+  it("captures usage for cancelled tasks and still propagates progress-only read errors", async () => {
+    registerTask({
+      taskId: "task-cancel-usage",
+      serverId: "srv",
+      sessionId: "s1",
+      cancelledAt: Date.now(),
+    });
+    const client = {
+      session: {
+        status: vi.fn(),
+        messages: vi.fn().mockResolvedValue({ data: [] }),
+      },
+    };
+    const cancelled = await deriveTaskStatus(client as never, "s1", "task-cancel-usage", {
+      includeUsage: true,
+    });
+    expect(cancelled.usage?.report).not.toBeNull();
+    removeTask("task-cancel-usage");
+
+    registerTask({
+      taskId: "task-cancel-usage-error",
+      serverId: "srv",
+      sessionId: "s1",
+      cancelledAt: Date.now(),
+    });
+    const usageReadFailure = {
+      session: {
+        status: vi.fn(),
+        messages: vi.fn().mockRejectedValue(new Error("cancelled read failed")),
+      },
+    };
+    const unavailableUsage = await deriveTaskStatus(
+      usageReadFailure as never,
+      "s1",
+      "task-cancel-usage-error",
+      { includeUsage: true },
+    );
+    expect(unavailableUsage.usage?.diagnostic).toBe("usage unavailable: cancelled read failed");
+    removeTask("task-cancel-usage-error");
+
+    registerTask({
+      taskId: "task-cancel-error",
+      serverId: "srv",
+      sessionId: "s1",
+      cancelledAt: Date.now(),
+    });
+    const failedRead = {
+      session: { status: vi.fn(), messages: vi.fn().mockRejectedValue("read denied") },
+    };
+    await expect(
+      deriveTaskStatus(failedRead as never, "s1", "task-cancel-error", { includeProgress: true }),
+    ).rejects.toBe("read denied");
+    removeTask("task-cancel-error");
   });
 
   it("returns running when the session is retrying", async () => {
@@ -327,6 +634,38 @@ describe("deriveTaskStatus", () => {
     expect(result).toEqual({ task_id: "task-1", status: "completed", progress: undefined });
   });
 
+  it("derives status from the active run instead of an earlier completed turn", async () => {
+    registerTask({
+      taskId: "task-current-run",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-current",
+      runs: [{ run_id: "run-current", message_id: "user-current", startedAt: 20 }],
+    });
+    const client = {
+      session: {
+        status: vi.fn().mockResolvedValue({ data: {} }),
+        messages: vi.fn().mockResolvedValue({
+          data: [
+            {
+              info: { role: "assistant", parentID: "user-previous", time: { completed: 1 } },
+              parts: [{ type: "text", text: "old result" }],
+            },
+            {
+              info: { role: "assistant", parentID: "user-current", time: {} },
+              parts: [{ type: "text", text: "current work" }],
+            },
+          ],
+        }),
+      },
+    };
+
+    const result = await deriveTaskStatus(client as never, "s1", "task-current-run");
+
+    expect(result).toEqual({ task_id: "task-current-run", status: "running", progress: undefined });
+    removeTask("task-current-run");
+  });
+
   it("includes side-effect evidence on the completed path when includeProgress is true", async () => {
     const client = {
       session: {
@@ -506,6 +845,29 @@ describe("deriveTaskStatus", () => {
   });
 });
 
+describe("deriveAssistantTurnStatus", () => {
+  it("maps a missing turn to pending", () => {
+    expect(deriveAssistantTurnStatus(undefined)).toEqual({ status: "pending" });
+  });
+
+  it("reports a terminal tool error instead of successful work", () => {
+    const entry = {
+      info: { time: { completed: 42 } },
+      parts: [
+        {
+          type: "tool",
+          tool: "bash",
+          state: { status: "error", error: "permission denied", input: {} },
+        },
+      ],
+    };
+    expect(deriveAssistantTurnStatus(entry as never)).toEqual({
+      status: "failed",
+      error: "bash failed: permission denied",
+    });
+  });
+});
+
 describe("buildProgress across a whole session", () => {
   it("reads the snippet from the latest turn and the evidence from every turn", () => {
     const earlier = [
@@ -572,6 +934,58 @@ describe("assistantEntries", () => {
   it("returns an empty array when the session has no messages", async () => {
     const client = { session: { messages: vi.fn().mockResolvedValue({ data: undefined }) } };
     expect(await assistantEntries(client as never, "s1")).toEqual([]);
+  });
+
+  it("throws on an HTTP error returned by the SDK", async () => {
+    const client = {
+      session: { messages: vi.fn().mockResolvedValue({ error: { message: "HTTP 500" } }) },
+    };
+    await expect(assistantEntries(client as never, "s1")).rejects.toEqual({
+      message: "HTTP 500",
+    });
+  });
+});
+
+describe("currentRunEntries", () => {
+  it("excludes stale prior-run turns and retains all assistant turns for the active message", async () => {
+    registerTask({
+      taskId: "task-run-boundary",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-2",
+      runs: [
+        { run_id: "run-1", message_id: "user-old", startedAt: 1 },
+        { run_id: "run-2", message_id: "user-new", startedAt: 2 },
+      ],
+    });
+    const client = {
+      session: {
+        messages: vi.fn().mockResolvedValue({
+          data: [
+            {
+              info: { role: "assistant", parentID: "user-old" },
+              parts: [{ type: "text", text: "stale" }],
+            },
+            {
+              info: { role: "assistant", parentID: "user-new" },
+              parts: [{ type: "text", text: "turn one" }],
+            },
+            {
+              info: { role: "assistant", parentID: "user-new" },
+              parts: [{ type: "text", text: "turn two" }],
+            },
+          ],
+        }),
+      },
+    };
+
+    const entries = await currentRunEntries(client as never, "s1", "task-run-boundary");
+
+    expect(entries.map((entry) => entry.parts[0])).toEqual([
+      { type: "text", text: "turn one" },
+      { type: "text", text: "turn two" },
+    ]);
+    removeTask("task-run-boundary");
   });
 });
 

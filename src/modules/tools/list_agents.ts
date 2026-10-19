@@ -1,8 +1,10 @@
+import { realpath, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Agent, Provider } from "@opencode-ai/sdk";
-import { createOpencodeClient } from "@opencode-ai/sdk";
 import { z } from "zod";
 import { jsonError, jsonResult } from "../shared/mcp-result.js";
+import { clientForServer } from "../shared/opencode-client.js";
 import { getServer } from "../shared/server-registry.js";
 import {
   getUsageLimits,
@@ -79,16 +81,36 @@ export function registerOpencodeListAgents(server: McpServer) {
         "List agents (native and custom) and available models/providers on an OpenCode server instance",
       inputSchema: {
         server_id: z.string().describe("Id of the server instance to query"),
+        directory: z
+          .string()
+          .optional()
+          .describe("Project directory, relative to the server directory unless absolute"),
       },
     },
-    async ({ server_id }) => {
+    async ({ server_id, directory }) => {
       const instance = getServer(server_id);
       if (!instance) {
         return jsonError({ server_id, status: "not_found" });
       }
 
       try {
-        const client = createOpencodeClient({ baseUrl: instance.baseUrl });
+        let projectDirectory: string;
+        try {
+          projectDirectory = await realpath(
+            resolve(instance.directory ?? process.cwd(), directory ?? "."),
+          );
+          if (!(await stat(projectDirectory)).isDirectory()) {
+            return jsonError({ server_id, status: "invalid_directory", directory });
+          }
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || code === "ENOTDIR") {
+            return jsonError({ server_id, status: "invalid_directory", directory });
+          }
+          throw error;
+        }
+        const client = clientForServer(server_id, projectDirectory);
+        if (!client) return jsonError({ server_id, status: "not_found" });
         // getUsageLimits() reads a once-a-day snapshot from disk, so this adds
         // no network round-trip on a warm cache and never throws.
         const [agentsResult, providersResult, limits] = await Promise.all([
@@ -109,6 +131,7 @@ export function registerOpencodeListAgents(server: McpServer) {
 
         return jsonResult({
           server_id,
+          directory: projectDirectory,
           agents: {
             native: allAgents.filter(isNativeAgent).map(toAgentSummary),
             custom: allAgents.filter((a) => !isNativeAgent(a)).map(toAgentSummary),

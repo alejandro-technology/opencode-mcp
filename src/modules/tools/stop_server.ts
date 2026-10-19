@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { stopServerObservers } from "../shared/run-observer.js";
 import { getServer, removeServer } from "../shared/server-registry.js";
 
 export function registerOpencodeStopServer(server: McpServer) {
@@ -25,6 +26,23 @@ export function registerOpencodeStopServer(server: McpServer) {
         };
       }
 
+      const checksDrained = await stopServerObservers(server_id);
+      if (!checksDrained) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                server_id,
+                status: "cleanup_pending",
+                message:
+                  "Check process termination could not be confirmed; server and workspace lease remain active. Retry opencode_stop_server after cleanup settles.",
+              }),
+            },
+          ],
+        };
+      }
       instance.close();
       removeServer(server_id);
 

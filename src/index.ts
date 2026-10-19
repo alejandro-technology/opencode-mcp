@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createDelegateTaskInstructions } from "./modules/shared/instructions.js";
+import { stopRunObservers } from "./modules/shared/run-observer.js";
 import { killAllServers } from "./modules/shared/server-registry.js";
 import { registerTools } from "./modules/tools/index.js";
 
@@ -11,7 +12,7 @@ async function createServer() {
   return new McpServer(
     {
       name: "opencode-mcp",
-      version: "1.0.0",
+      version: "1.2.0",
       title: "OpenCode MCP",
       description:
         "MCP server that drives an OpenCode instance and delegates work asynchronously to its agents",
@@ -23,10 +24,22 @@ async function createServer() {
   );
 }
 
-function shutdown(signal: NodeJS.Signals) {
+let shuttingDown = false;
+
+async function shutdown(signal: NodeJS.Signals, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.error(`Received ${signal}, stopping tracked OpenCode servers...`);
+  const checksDrained = await stopRunObservers();
+  if (!checksDrained) {
+    console.error(
+      "One or more check process groups could not be confirmed stopped; OpenCode servers remain active and shutdown can be retried.",
+    );
+    shuttingDown = false;
+    return;
+  }
   killAllServers();
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 // Terminal closed (SIGHUP), Ctrl+C (SIGINT), or a normal kill (SIGTERM):
@@ -35,7 +48,9 @@ process.on("SIGHUP", shutdown);
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 // Safety net for any other exit path (uncaught exception, process.exit elsewhere).
-process.on("exit", killAllServers);
+process.on("exit", () => {
+  killAllServers();
+});
 
 async function main() {
   const server = await createServer();
@@ -45,7 +60,7 @@ async function main() {
   console.error("OpenCode MCP Server running on stdio");
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error("Fatal error in main():", error);
-  process.exit(1);
+  await shutdown("SIGTERM", 1);
 });

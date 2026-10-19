@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Releases before `1.2.0` predate this file and are not documented here.
 
+## Unreleased
+
+## [1.3.0] — 2026-10-19
+
+### Added
+
+- Caller-provided expected workspace changes and bounded executable checks, with additive per-run `workspace_delta` reports and verification states.
+- Workspace-wide overlapping-directory leases, report-aware waits, and an independent lifecycle observer for accepted runs.
+- Prompt dispatch now distinguishes definite HTTP 4xx rejection from ambiguous ACK failures. Ambiguous runs remain tracked with their writer lease held and return `dispatch_uncertain`; definite rejection rolls back only the provisional run.
+- Caller message IDs use OpenCode's required `msg_` namespace; the real smoke includes a non-billable bare-UUID runtime probe.
+- Bounded filesystem inventory, check output, and direct `shell: false` execution; report diagnostics disclose incomplete evidence and shared-workspace attribution uncertainty.
+- Historical `run_id` status/result retrieval and cached final text/progress/report; tool getters do not execute checks again.
+- Opt-in real OpenCode stdio smoke command (`pnpm smoke`) using only the exact `openai/gpt-6-luna` model, including directory-scoped permission handling and independent managed worktrees.
+- Each accepted prompt has an additive `run_id` and run-history record. Explicit user-message IDs scope status, progress, and results to the active prompt; earlier assistant turns cannot appear as a pending continuation's output.
+- Continuation dispatches are reserved per task, cancellation state is recorded only after an accepted abort, and accepted continuations clear prior cancellation state.
+- Status and wait share terminal-state rules; `empty` and `cancelled` now finish long polls.
+- SDK HTTP requests use a 30-second abort deadline; long-polling bounds each status read by the remaining total wait deadline.
+- Server/task records optionally retain the canonical server working directory.
+- Status, wait, and result payloads report direct assistant INFO usage with run/session snapshots, provider/model breakdowns, completeness metadata, and immutable per-run historical snapshots; missing metrics remain unknown and cost currency is unspecified.
+- Optional task directories and managed detached Git worktrees bind SDK requests and per-session permission responders to the selected project. Worktree IDs/metadata appear in task history, and `opencode_cleanup_workspace` performs explicit serialized cleanup while preserving cached reports and usage.
+
+### Fixed
+
+- SDK response-level errors are surfaced for prompt dispatch, abort, status/message reads, and permission responses, including HTTP failures returned without throwing.
+- Permission responder diagnostics go to stderr rather than MCP stdio.
+- `opencode_wait_for_task` progress enrichment now shares the absolute wait deadline; a slow enrichment is aborted and returns the last observed task status/progress rather than extending the call.
+
 ## [1.2.0] — 2026-08-28
 
 Delegated tasks could hang forever, or report `completed` after doing nothing.

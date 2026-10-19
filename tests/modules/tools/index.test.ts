@@ -19,6 +19,7 @@ describe("registerTools", () => {
       "opencode_wait_for_task",
       "opencode_continue_task",
       "opencode_cancel_task",
+      "opencode_cleanup_workspace",
     ]);
   });
 });

@@ -41,6 +41,12 @@ describe("createDelegateTaskInstructions", () => {
     );
     expect(instructions).toContain("both copied verbatim");
     expect(instructions).toContain("unknown_model");
+    expect(instructions).toContain(
+      "Usage reports aggregate only direct assistant-message INFO metrics",
+    );
+    expect(instructions).toContain(
+      "Historical results retain the usage snapshot captured at run finalization",
+    );
   });
 
   it("embeds the live spend budget and the tier legend", async () => {

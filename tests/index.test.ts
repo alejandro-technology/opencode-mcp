@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const connectMock = vi.fn().mockResolvedValue(undefined);
 const registerToolsMock = vi.fn();
 const killAllServersMock = vi.fn();
+const stopRunObserversMock = vi.fn().mockResolvedValue(true);
 
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
   McpServer: vi.fn().mockImplementation(function McpServer() {
@@ -17,6 +18,9 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 vi.mock("../src/modules/shared/server-registry.js", () => ({
   killAllServers: killAllServersMock,
 }));
+vi.mock("../src/modules/shared/run-observer.js", () => ({
+  stopRunObservers: stopRunObserversMock,
+}));
 vi.mock("../src/modules/tools/index.js", () => ({
   registerTools: registerToolsMock,
 }));
@@ -29,7 +33,7 @@ vi.mock("../src/modules/shared/instructions.js", () => ({
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 describe("index entrypoint", () => {
-  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
   let processOnSpy: ReturnType<typeof vi.spyOn>;
   let processExitSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
@@ -40,10 +44,11 @@ describe("index entrypoint", () => {
     connectMock.mockClear();
     registerToolsMock.mockClear();
     killAllServersMock.mockClear();
+    stopRunObserversMock.mockReset().mockResolvedValue(true);
 
     processOnSpy = vi
       .spyOn(process, "on")
-      .mockImplementation((event: string | symbol, handler: (...args: unknown[]) => void) => {
+      .mockImplementation((event: string | symbol, handler: (...args: unknown[]) => unknown) => {
         handlers.set(String(event), handler);
         return process;
       });
@@ -73,9 +78,43 @@ describe("index entrypoint", () => {
     await import("../src/index.js");
     await flush();
 
-    handlers.get("SIGINT")?.("SIGINT");
+    await handlers.get("SIGINT")?.("SIGINT");
 
+    expect(stopRunObserversMock).toHaveBeenCalledOnce();
     expect(killAllServersMock).toHaveBeenCalled();
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it("does not close servers or exit before check-process drain completes", async () => {
+    let finishDrain!: (value: boolean) => void;
+    stopRunObserversMock.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishDrain = resolve;
+        }),
+    );
+    await import("../src/index.js");
+    await flush();
+    const shutdownCall = handlers.get("SIGTERM")?.("SIGTERM");
+    expect(killAllServersMock).not.toHaveBeenCalled();
+    expect(processExitSpy).not.toHaveBeenCalled();
+    await handlers.get("SIGINT")?.("SIGINT");
+    expect(stopRunObserversMock).toHaveBeenCalledOnce();
+    finishDrain(true);
+    await shutdownCall;
+    expect(killAllServersMock).toHaveBeenCalledOnce();
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it("keeps the MCP process and server records alive when check termination is unconfirmed", async () => {
+    stopRunObserversMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await import("../src/index.js");
+    await flush();
+    await handlers.get("SIGINT")?.("SIGINT");
+    expect(killAllServersMock).not.toHaveBeenCalled();
+    expect(processExitSpy).not.toHaveBeenCalled();
+    await handlers.get("SIGINT")?.("SIGINT");
+    expect(killAllServersMock).toHaveBeenCalledOnce();
     expect(processExitSpy).toHaveBeenCalledWith(0);
   });
 

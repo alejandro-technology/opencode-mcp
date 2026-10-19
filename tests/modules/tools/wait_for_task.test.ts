@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const clientForTaskMock = vi.fn();
@@ -7,6 +8,8 @@ const deriveTaskStatusMock = vi.fn();
 vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   clientForTask: (...args: unknown[]) => clientForTaskMock(...args),
   deriveTaskStatus: (...args: unknown[]) => deriveTaskStatusMock(...args),
+  isTerminalTaskStatus: (status: string) =>
+    ["completed", "failed", "empty", "cancelled", "error"].includes(status),
 }));
 
 const { registerOpencodeWaitForTask } = await import("../../../src/modules/tools/wait_for_task.js");
@@ -20,6 +23,13 @@ describe("opencode_wait_for_task", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    for (const taskId of [
+      "report-unavailable",
+      "report-pending-no-backend",
+      "report-pending",
+      "report-error-fallback",
+    ])
+      removeTask(taskId);
   });
 
   it("returns not_found when any task cannot be resolved (fail-fast)", async () => {
@@ -40,6 +50,213 @@ describe("opencode_wait_for_task", () => {
       ],
     });
     expect(deriveTaskStatusMock).not.toHaveBeenCalled();
+  });
+
+  it("returns finalized unavailable reports without requiring the stopped backend", async () => {
+    registerTask({
+      taskId: "report-unavailable",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-1",
+      runs: [
+        {
+          run_id: "run-1",
+          message_id: "msg-1",
+          startedAt: 1,
+          reportReady: true,
+          executionState: "pending",
+          usage: {
+            captured_at: "2026-10-07T00:00:00.000Z",
+            snapshot_kind: "run_finalization",
+            report: null,
+            diagnostic: "usage unavailable: observer failed",
+          },
+          result: {
+            task_id: "report-unavailable",
+            run_id: "run-1",
+            status: "unavailable",
+            result: null,
+            error: "observer failed",
+          },
+          report: {
+            changes: [],
+            verification: { state: "unavailable", checks: [], execution_state: "pending" },
+            diagnostics: ["inventory unavailable"],
+            evidence: {
+              source: "workspace_delta",
+              inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
+              complete: false,
+              errors: ["inventory unavailable"],
+              attribution: "uncertain_shared_workspace",
+            },
+          },
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const payload = JSON.parse(
+      (
+        await fake.getHandler()({
+          task_ids: ["report-unavailable"],
+          until: "report",
+          timeout_ms: 1_000,
+        })
+      ).content[0].text,
+    );
+    expect(payload.timed_out).toBe(false);
+    expect(payload.tasks[0].verification.state).toBe("unavailable");
+    expect(payload.tasks[0].diagnostics).toEqual(["inventory unavailable"]);
+    expect(payload.tasks[0].usage).toMatchObject({
+      snapshot_kind: "run_finalization",
+      report: null,
+    });
+    const executionWait = await fake.getHandler()({
+      task_ids: ["report-unavailable"],
+      until: "execution",
+      timeout_ms: 1,
+      poll_interval_ms: 500,
+    });
+    expect(JSON.parse(executionWait.content[0].text).timed_out).toBe(true);
+    removeTask("report-unavailable");
+  });
+
+  it("includes uncertain dispatch details in finalized wait reports", async () => {
+    registerTask({
+      taskId: "uncertain-wait",
+      serverId: "srv",
+      sessionId: "session",
+      workspace: {
+        mode: "worktree",
+        workspace_id: "workspace-uncertain",
+        source_directory: "/src",
+        execution_directory: "/work",
+        managed: true,
+        state: "active",
+      },
+      currentRunId: "run-uncertain",
+      runs: [
+        {
+          run_id: "run-uncertain",
+          message_id: "msg-uncertain",
+          startedAt: 1,
+          reportReady: true,
+          executionState: "completed",
+          dispatchState: "uncertain",
+          dispatchError: "ACK lost",
+          result: {
+            task_id: "uncertain-wait",
+            run_id: "run-uncertain",
+            status: "completed",
+            result: "done",
+          },
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const result = await fake.getHandler()({ task_ids: ["uncertain-wait"], until: "report" });
+    expect(JSON.parse(result.content[0].text).tasks[0].dispatch).toEqual({
+      state: "uncertain",
+      error: "ACK lost",
+    });
+    removeTask("uncertain-wait");
+  });
+
+  it("times out a report wait whose tracked run has no backend and no final report yet", async () => {
+    registerTask({
+      taskId: "report-pending-no-backend",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-1",
+      runs: [
+        {
+          run_id: "run-1",
+          message_id: "msg-1",
+          startedAt: 1,
+          executionState: "running",
+          reportReady: false,
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const payload = JSON.parse(
+      (
+        await fake.getHandler()({
+          task_ids: ["report-pending-no-backend"],
+          until: "report",
+          timeout_ms: 1,
+        })
+      ).content[0].text,
+    );
+    expect(payload.timed_out).toBe(true);
+    expect(payload.tasks[0].verification.state).toBe("pending");
+    removeTask("report-pending-no-backend");
+  });
+
+  it("keeps report waits inside the requested deadline when finalization is pending", async () => {
+    vi.useFakeTimers();
+    registerTask({
+      taskId: "report-pending",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-1",
+      runs: [{ run_id: "run-1", message_id: "msg-1", startedAt: 1 }],
+    });
+    clientForTaskMock.mockReturnValue({ client: {}, sessionId: "s1" });
+    deriveTaskStatusMock.mockResolvedValue({ task_id: "report-pending", status: "completed" });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const pending = fake.getHandler()({
+      task_ids: ["report-pending"],
+      until: "report",
+      timeout_ms: 1_000,
+      poll_interval_ms: 500,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const payload = JSON.parse((await pending).content[0].text);
+    expect(payload.timed_out).toBe(true);
+    expect(payload.tasks[0].status).toBe("completed");
+    expect(payload.tasks[0].verification.state).toBe("pending");
+    removeTask("report-pending");
+  });
+
+  it("uses the unavailable fallback when a finalized run has no execution status", async () => {
+    registerTask({
+      taskId: "report-error-fallback",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-1",
+      runs: [
+        {
+          run_id: "run-1",
+          message_id: "msg-1",
+          startedAt: 1,
+          reportReady: true,
+          dispatchState: "uncertain",
+          dispatchError: "ACK lost",
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+    const payload = JSON.parse(
+      (
+        await fake.getHandler()({
+          task_ids: ["report-error-fallback"],
+          until: "report",
+          timeout_ms: 1_000,
+        })
+      ).content[0].text,
+    );
+    expect(payload.tasks[0].status).toBe("error");
+    expect(payload.tasks[0].verification.state).toBe("pending");
+    expect(payload.tasks[0].dispatch).toEqual({ state: "uncertain", error: "ACK lost" });
   });
 
   it("returns immediately when all tasks are already completed (all mode)", async () => {
@@ -70,6 +287,20 @@ describe("opencode_wait_for_task", () => {
       ],
     });
     expect(deriveTaskStatusMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["empty", "cancelled"] as const)("treats %s as terminal in all mode", async (status) => {
+    clientForTaskMock.mockReturnValue({ client: {}, sessionId: "s1" });
+    deriveTaskStatusMock.mockResolvedValue({ task_id: "task-1", status });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+
+    const result = await fake.getHandler()({ task_ids: ["task-1"], mode: "all" });
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      tasks: [{ task_id: "task-1", status }],
+      timed_out: false,
+    });
   });
 
   it("polls multiple tasks until all complete (all mode after N polls)", async () => {
@@ -240,7 +471,7 @@ describe("opencode_wait_for_task", () => {
     });
 
     const parsedResult = JSON.parse((result.content[0] as { type: string; text: string }).text);
-    expect(parsedResult).toEqual({
+    expect(parsedResult).toMatchObject({
       mode: "all",
       tasks: [
         { task_id: "task-1", status: "completed" },
@@ -248,6 +479,7 @@ describe("opencode_wait_for_task", () => {
           task_id: "task-2",
           status: "error",
           error: "SDK error on task-2",
+          usage: { report: null, diagnostic: "usage unavailable: SDK error on task-2" },
         },
       ],
       timed_out: false,
@@ -450,19 +682,34 @@ describe("opencode_wait_for_task", () => {
     expect(parsed.timed_out).toBe(true);
   });
 
-  it("enriches unfinished tasks with progress on timeout when include_progress is true", async () => {
+  it("aborts a stuck status read at the total wait deadline", async () => {
+    vi.useFakeTimers();
+    clientForTaskMock.mockReturnValue({ client: {}, sessionId: "s1" });
+    deriveTaskStatusMock.mockImplementation((_client, _sessionId, _taskId, options) => {
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      return new Promise(() => {});
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+
+    const pending = fake.getHandler()({ task_ids: ["task-1"], timeout_ms: 1000 });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await pending;
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      tasks: [{ task_id: "task-1", status: "running" }],
+      timed_out: true,
+    });
+  });
+
+  it("skips progress enrichment when the timeout leaves no request budget", async () => {
     vi.useFakeTimers();
     const client = {};
     clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
-    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
-      if (options?.includeProgress) {
-        return {
-          task_id: taskId,
-          status: "running",
-          progress: { text_snippet: "partial output", tool_calls_completed: 2 },
-        };
-      }
-      return { task_id: taskId, status: "running" };
+    deriveTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      status: "running",
+      progress: { text_snippet: "already observed", tool_calls_completed: 1 },
     });
     const fake = createFakeMcpServer();
     registerOpencodeWaitForTask(fake.server);
@@ -485,12 +732,54 @@ describe("opencode_wait_for_task", () => {
       {
         task_id: "task-1",
         status: "running",
-        progress: { text_snippet: "partial output", tool_calls_completed: 2 },
+        progress: { text_snippet: "already observed", tool_calls_completed: 1 },
       },
     ]);
+    expect(deriveTaskStatusMock).toHaveBeenCalledTimes(3);
+    expect(
+      deriveTaskStatusMock.mock.calls.every((call) => call[3]?.includeProgress === undefined),
+    ).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("does not request progress during polling, only once at the end", async () => {
+  it("aborts a hanging mode:any progress enrichment at the original deadline", async () => {
+    vi.useFakeTimers();
+    clientForTaskMock.mockReturnValue({ client: {}, sessionId: "s1" });
+    let enrichmentSignal: AbortSignal | undefined;
+    deriveTaskStatusMock.mockImplementation(async (_client, _sessionId, taskId, options) => {
+      if (options?.includeProgress) {
+        enrichmentSignal = options.signal;
+        return new Promise(() => {});
+      }
+      return taskId === "task-1"
+        ? { task_id: taskId, status: "completed" }
+        : { task_id: taskId, status: "running", progress: { text_snippet: "observed" } };
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+
+    const pending = fake.getHandler()({
+      task_ids: ["task-1", "task-2"],
+      mode: "any",
+      timeout_ms: 1000,
+      include_progress: true,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await pending;
+
+    expect(enrichmentSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      mode: "any",
+      tasks: [
+        { task_id: "task-1", status: "completed" },
+        { task_id: "task-2", status: "running", progress: { text_snippet: "observed" } },
+      ],
+      timed_out: false,
+    });
+  });
+
+  it("does not issue another progress request after the timeout", async () => {
     vi.useFakeTimers();
     const client = {};
     clientForTaskMock.mockReturnValue({ client, sessionId: "s1" });
@@ -514,9 +803,7 @@ describe("opencode_wait_for_task", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await promise;
 
-    // Polling iterations (no progress) + one final enrichment call (with progress).
-    expect(includeProgressCalls.slice(0, -1).every((v) => v === undefined)).toBe(true);
-    expect(includeProgressCalls.at(-1)).toBe(true);
+    expect(includeProgressCalls.every((value) => value === undefined)).toBe(true);
   });
 
   it("falls back to the un-enriched entry when progress re-derivation fails", async () => {
