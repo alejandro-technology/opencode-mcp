@@ -9,6 +9,8 @@ Releases before `1.2.0` predate this file and are not documented here.
 
 ## Unreleased
 
+## [1.3.0] — 2026-10-19
+
 ### Added
 
 - Caller-provided expected workspace changes and bounded executable checks, with additive per-run `workspace_delta` reports and verification states.
