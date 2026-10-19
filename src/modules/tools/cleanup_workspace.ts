@@ -58,8 +58,7 @@ export function registerOpencodeCleanupWorkspace(server: McpServer) {
             (run) =>
               !run.reportReady ||
               run.workspaceLease !== undefined ||
-              run.dispatchState === "dispatching" ||
-              run.dispatchState === "uncertain",
+              run.dispatchState === "dispatching",
           );
           if (unfinished) {
             return jsonError({

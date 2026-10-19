@@ -186,7 +186,7 @@ describe("opencode_cleanup_workspace", () => {
     ).toBe("removed");
   });
 
-  it("rejects missing tasks and pending dispatch/check leases even when other runs are finalized", async () => {
+  it("rejects active dispatch/check leases and permits a finalized uncertain dispatch", async () => {
     const missingTask = await setup();
     removeTask(missingTask.taskId);
     expect(
@@ -201,6 +201,7 @@ describe("opencode_cleanup_workspace", () => {
     if (!run) throw new Error("cleanup fixture run was not registered");
     run.reportReady = true;
     run.workspaceLease = Symbol("active report lease");
+    run.dispatchState = "uncertain";
     expect(
       payload(await pendingCheck.handler({ workspace_id: pendingCheck.workspaceId })).status,
     ).toBe("workspace_task_active");
@@ -210,12 +211,23 @@ describe("opencode_cleanup_workspace", () => {
       payload(await pendingCheck.handler({ workspace_id: pendingCheck.workspaceId })).status,
     ).toBe("workspace_task_active");
     run.dispatchState = "uncertain";
+    run.reportReady = false;
     expect(
       payload(await pendingCheck.handler({ workspace_id: pendingCheck.workspaceId })).status,
     ).toBe("workspace_task_active");
-    task.runs = undefined;
+    run.reportReady = true;
     expect(
       payload(await pendingCheck.handler({ workspace_id: pendingCheck.workspaceId })).status,
+    ).toBe("removed");
+
+    const emptyHistory = await setup();
+    const taskWithoutRuns = (await import("../../../src/modules/shared/task-registry.js")).getTask(
+      emptyHistory.taskId,
+    );
+    if (!taskWithoutRuns) throw new Error("cleanup fixture task was not registered");
+    taskWithoutRuns.runs = undefined;
+    expect(
+      payload(await emptyHistory.handler({ workspace_id: emptyHistory.workspaceId })).status,
     ).toBe("removed");
   });
 
