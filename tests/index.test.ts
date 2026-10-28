@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn().mockResolvedValue(undefined);
@@ -72,6 +74,18 @@ describe("index entrypoint", () => {
     expect(handlers.has("SIGINT")).toBe(true);
     expect(handlers.has("SIGTERM")).toBe(true);
     expect(handlers.has("exit")).toBe(true);
+  });
+
+  it("announces the same version as the published package", async () => {
+    const { version } = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    await import("../src/index.js");
+    await flush();
+
+    expect(McpServer).toHaveBeenLastCalledWith(expect.objectContaining({ version }), {
+      instructions: "instructions",
+    });
   });
 
   it("shuts down tracked servers and exits on SIGINT", async () => {

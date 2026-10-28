@@ -2,14 +2,15 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixtureParent = "/var/folders/_8/xr5shfw97998zq57_jc38zlh0000gn/T/opencode";
-const model = "openai/gpt-6-luna";
+const fixtureParent = tmpdir();
+const model = process.env.OPENCODE_MCP_SMOKE_MODEL ?? "openai/gpt-6-luna";
 const timeoutMs = 600_000;
 
 type RpcReply = { id?: number; result?: unknown; error?: { code: number; message: string } };

@@ -9,6 +9,21 @@ Releases before `1.2.0` predate this file and are not documented here.
 
 ## Unreleased
 
+## [1.3.1] — 2026-10-28
+
+### Changed
+
+- Declare the existing Node.js 18+ runtime requirement in package metadata. Document Node.js 22.18+ for development and native TypeScript smoke tests; CI now checks the development suite on Node.js 22 and 24.
+- Shorten the README's "How it works" section while retaining execution reports, managed worktrees, and usage reporting. Document process-local state, permission policies, and the trust boundary.
+- Clarify that the adapter targets OpenCode 1.x; OpenCode 2.x compatibility is not yet supported.
+
+### Fixed
+
+- Align the MCP server's advertised version with package version `1.3.1` instead of reporting `1.2.0`, with a regression test to catch future drift.
+- Use the system temporary directory for smoke fixtures instead of a machine-specific path. Allow the paid smoke model to be selected with `OPENCODE_MCP_SMOKE_MODEL`, preserving the existing default.
+- Remove references to the unregistered `delegate_task` prompt and nonexistent source directories; correct contributor test commands and typechecking guidance.
+- Limit TypeScript compilation to existing source paths and exclude test utilities from build output and the npm package.
+
 ## [1.3.0] — 2026-10-19
 
 ### Added
