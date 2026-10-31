@@ -1,42 +1,25 @@
-import type { Config, OpencodeClient } from "@opencode-ai/sdk";
+import type { OpenCodeClient } from "@opencode/client";
 
-/**
- * A pending permission request, as the OpenCode server actually emits it.
- *
- * The SDK's generated `Permission` type is stale relative to the running
- * binary (verified against opencode 1.18.18 / `@opencode-ai/sdk` 1.17.20):
- * the live event is `permission.asked` rather than `permission.updated`, the
- * permission kind arrives as `permission` rather than `type`, and the call id
- * is nested under `tool`. Both spellings are accepted so this keeps working
- * whichever side moves first.
- */
+/** CLI2 permission request payload carried by `permission.asked` and permission.list. */
 export interface PermissionAsk {
   id: string;
   sessionID: string;
-  /** Live server field. */
-  permission?: string;
-  /** Generated-SDK field. */
-  type?: string;
-  patterns?: string[];
-  always?: string[];
+  action: string;
+  resources: string[];
+  save?: string[];
+  source?: { type: string; messageID?: string; id?: string };
   metadata?: Record<string, unknown>;
-  /** Live server nests the originating call here. */
-  tool?: { messageID?: string; callID?: string };
-  /** Generated-SDK field. */
-  callID?: string;
+  message?: string;
 }
 
-/** Event types that carry a pending permission request. */
-const PERMISSION_EVENTS: ReadonlySet<string> = new Set(["permission.asked", "permission.updated"]);
-
-/** The permission kind, reading whichever field this server version emits. */
-export function permissionKind(ask: PermissionAsk): string | undefined {
-  return ask.permission ?? ask.type;
+/** The permission action requested by CLI2. */
+export function permissionKind(ask: PermissionAsk): string {
+  return ask.action;
 }
 
-/** The originating tool call id, reading whichever field this server emits. */
+/** The v2 tool-part id, when the request originated from a tool. */
 export function permissionCallID(ask: PermissionAsk): string | undefined {
-  return ask.tool?.callID ?? ask.callID;
+  return ask.source?.id;
 }
 
 /**
@@ -57,8 +40,7 @@ export const EXTERNAL_DIRECTORY = "external_directory";
 /**
  * Tools that only observe. OpenCode raises a single `external_directory`
  * permission for reads and writes alike, so the operation has to be recovered
- * from the tool that triggered it. Names verified against the live catalog
- * (`client.tool.ids()` on opencode 1.18.18) — there is no `list` tool.
+ * from the v2 request source and assistant message tool part.
  */
 const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "webfetch", "websearch"]);
 
@@ -108,34 +90,22 @@ function parsePolicy(value: string | undefined): ExternalDirectoryPolicy | undef
   return normalized as ExternalDirectoryPolicy;
 }
 
-/**
- * Build the config handed to `createOpencodeServer`.
- *
- * OpenCode deep-merges this over the user's global config per permission key,
- * so only `external_directory` is touched — existing `read` / `edit` / `bash`
- * rules (including deny globs for secrets) survive untouched.
- *
- * `read-only` keeps the key on `ask` on purpose: the permission responder is
- * what applies the read/write split, and it can only do that if OpenCode still
- * raises the request.
- */
-export function buildServerConfig(policy: ExternalDirectoryPolicy): Config {
-  const external_directory = policy === "read-only" ? "ask" : policy;
-  return { permission: { external_directory } };
-}
-
 export type PermissionResponse = "once" | "always" | "reject";
+
+export function externalDirectoryPermission(policy: ExternalDirectoryPolicy) {
+  return {
+    action: EXTERNAL_DIRECTORY,
+    resource: "*",
+    effect: policy === "read-only" ? "ask" : policy,
+  } as const;
+}
 
 export interface PermissionDecision {
   response: PermissionResponse;
   reason: string;
 }
 
-/**
- * Call ids arrive as `<tool>_<n>` (e.g. `read_0`, `write_0`), so the tool name
- * is readable straight off the event with no round-trip and no race.
- */
-const CALL_ID_TOOL = /^(.+)_\d+$/;
+/** Correlate the request's source message and tool-part id to its tool name. */
 
 /**
  * Find the tool that raised a permission.
@@ -145,24 +115,24 @@ const CALL_ID_TOOL = /^(.+)_\d+$/;
  * tool parts — retried, because the event can land before the part is readable.
  */
 async function resolveToolName(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   ask: PermissionAsk,
   sleep: (ms: number) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
-  const callID = permissionCallID(ask);
-  if (callID === undefined) return undefined;
-
-  const encoded = CALL_ID_TOOL.exec(callID);
-  if (encoded) return encoded[1];
-
+  const toolID = ask.source?.id ?? permissionCallID(ask);
+  const messageID = ask.source?.messageID;
+  if (toolID === undefined || messageID === undefined || ask.source?.type !== "tool")
+    return undefined;
   for (let attempt = 0; attempt < CORRELATION_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(CORRELATION_DELAY_MS);
-    const res = await client.session.messages({ path: { id: ask.sessionID } });
-    for (const message of res.data ?? []) {
-      for (const part of message.parts) {
-        if (part.type === "tool" && part.callID === callID) return part.tool;
-      }
-    }
+    const message = await client.session.message.get(
+      { sessionID: ask.sessionID, messageID },
+      { signal },
+    );
+    if (message.type !== "assistant") continue;
+    const tool = message.content.find((part) => part.type === "tool" && part.id === toolID);
+    if (tool?.type === "tool") return tool.name;
   }
   return undefined;
 }
@@ -180,28 +150,23 @@ async function resolveToolName(
  * through and defeat the read-only boundary.
  */
 export async function decidePermission(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   ask: PermissionAsk,
   policy: ExternalDirectoryPolicy,
   sleep: (ms: number) => Promise<void> = defaultSleep,
+  signal?: AbortSignal,
 ): Promise<PermissionDecision> {
   if (permissionKind(ask) !== EXTERNAL_DIRECTORY) {
     return { response: "always", reason: "inside the server working directory" };
   }
   if (policy === "allow") {
-    return { response: "always", reason: "external_directory policy is 'allow'" };
+    return { response: "once", reason: "external_directory policy is 'allow'" };
   }
   if (policy === "deny") {
     return { response: "reject", reason: "external_directory policy is 'deny'" };
   }
 
-  // Shell commands carry their own metadata shape and can write through any
-  // number of paths, so they never qualify as read-only.
-  if (ask.metadata?.command !== undefined) {
-    return { response: "reject", reason: "shell command outside the working directory" };
-  }
-
-  const tool = await resolveToolName(client, ask, sleep);
+  const tool = await resolveToolName(client, ask, sleep, signal);
   if (tool === undefined) {
     return { response: "reject", reason: "could not identify the tool behind the request" };
   }
@@ -240,7 +205,7 @@ function defaultSleep(ms: number): Promise<void> {
  * genuinely busy and the task never completes or fails.
  */
 export function startPermissionResponder(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   options: PermissionResponderOptions = {},
 ): PermissionResponder {
   const policy = options.policy ?? getExternalDirectoryPolicy();
@@ -254,6 +219,28 @@ export function startPermissionResponder(
   const stop = () => {
     stopped = true;
     controller.abort(new Error("permission responder stopped"));
+  };
+
+  const handled = new Set<string>();
+  const handlePermission = async (ask: PermissionAsk, signal: AbortSignal) => {
+    if (stopped || (allowedSessionIDs && !allowedSessionIDs().has(ask.sessionID))) return;
+    if (handled.has(ask.id)) return;
+    handled.add(ask.id);
+    try {
+      const decision = await decidePermission(client, ask, policy, sleep, signal);
+      await client.permission.reply(
+        {
+          sessionID: ask.sessionID,
+          requestID: ask.id,
+          decision: decision.response,
+        },
+        { signal },
+      );
+      onDecision(ask, decision);
+    } catch (error) {
+      handled.delete(ask.id);
+      throw error;
+    }
   };
 
   const waitToReconnect = () =>
@@ -272,19 +259,41 @@ export function startPermissionResponder(
   const done = (async () => {
     while (!stopped) {
       try {
-        const { stream } = await client.event.subscribe({ signal: controller.signal });
-        for await (const event of stream) {
-          if (stopped) return;
-          if (!PERMISSION_EVENTS.has(event.type)) continue;
-          const ask = event.properties as unknown as PermissionAsk;
-          if (allowedSessionIDs && !allowedSessionIDs().has(ask.sessionID)) continue;
-          const decision = await decidePermission(client, ask, policy, sleep);
-          const response = await client.postSessionIdPermissionsPermissionId({
-            path: { id: ask.sessionID, permissionID: ask.id },
-            body: { response: decision.response },
-          });
-          if (response.error) throw response.error;
-          onDecision(ask, decision);
+        const connection = new AbortController();
+        const abortConnection = () => connection.abort(controller.signal.reason);
+        controller.signal.addEventListener("abort", abortConnection, { once: true });
+        const iterator = client.event
+          .subscribe({ signal: connection.signal })
+          [Symbol.asyncIterator]();
+        let nextEvent = iterator.next();
+        try {
+          while (!stopped) {
+            const next = await nextEvent;
+            if (next.done) break;
+            const event = next.value;
+            if (event.type === "server.connected") {
+              const sessions = allowedSessionIDs?.() ?? new Set<string>();
+              for (const sessionID of sessions) {
+                const requests = await client.permission.list(
+                  { sessionID },
+                  { signal: connection.signal },
+                );
+                for (const ask of requests) await handlePermission(ask, connection.signal);
+              }
+            } else if (event.type === "permission.asked") {
+              await handlePermission(event.data, connection.signal);
+            }
+            nextEvent = iterator.next();
+          }
+        } finally {
+          connection.abort(new Error("permission event connection closed"));
+          controller.signal.removeEventListener("abort", abortConnection);
+          try {
+            await iterator.return?.();
+          } catch {
+            // The abort signal already stopped the transport.
+          }
+          await nextEvent.catch(() => undefined);
         }
       } catch (error) {
         if (stopped) return;

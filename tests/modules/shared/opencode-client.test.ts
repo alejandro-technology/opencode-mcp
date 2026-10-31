@@ -1,59 +1,163 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const createOpencodeClientMock = vi.fn();
+const makeClientMock = vi.fn();
 
-vi.mock("@opencode-ai/sdk", () => ({
-  createOpencodeClient: (...args: unknown[]) => createOpencodeClientMock(...args),
+vi.mock("@opencode/client", () => ({
+  OpenCode: { make: (...args: unknown[]) => makeClientMock(...args) },
 }));
 
+import type { OpenCodeClient } from "@opencode/client";
 import {
-  assistantEntries,
+  assistantEntries as assistantEntriesV2,
   buildProgress,
   CANCELLED_TASK_MESSAGE,
   clientForServer,
   clientForTask,
-  currentRunEntries,
+  currentRunEntries as currentRunEntriesV2,
   deriveAssistantTurnStatus,
-  deriveTaskStatus,
+  deriveTaskStatus as deriveTaskStatusV2,
   EMPTY_TURN_MESSAGE,
   fetchWithDeadline,
   hasWork,
   isTerminalTaskStatus,
-  lastAssistantEntry,
+  lastAssistantEntry as lastAssistantEntryV2,
   PENDING_STALL_MS,
+  restoreSessionSelection,
   sessionParts,
 } from "../../../src/modules/shared/opencode-client.js";
 import { killAllServers, registerServer } from "../../../src/modules/shared/server-registry.js";
 import { registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
 
+type TestRecord = Record<string, unknown>;
+interface LegacyFixtureClient {
+  session: {
+    messages: (input: { path: { id: string } }) => Promise<unknown>;
+    status?: () => Promise<unknown>;
+  };
+}
+
+function record(value: unknown): TestRecord {
+  return typeof value === "object" && value !== null ? (value as TestRecord) : {};
+}
+
+function v2Client(legacy: LegacyFixtureClient): OpenCodeClient {
+  const messages = async (sessionID: string) => {
+    const response = record(await legacy.session.messages({ path: { id: sessionID } }));
+    if (response.error) throw response.error;
+    const entries = Array.isArray(response.data) ? response.data : [];
+    return {
+      data: entries.map((value) => {
+        const message = record(value);
+        const info = record(message.info);
+        if (info.role === "assistant") {
+          const oldParts = Array.isArray(message.parts) ? message.parts : [];
+          return {
+            type: "assistant" as const,
+            id: String(info.id ?? "assistant"),
+            time: record(info.time) as { created: number; completed?: number },
+            error: info.error
+              ? {
+                  type: String(record(info.error).name ?? "Error"),
+                  message: String(record(info.error).message ?? ""),
+                }
+              : undefined,
+            metadata: info.parentID ? { parentID: String(info.parentID) } : {},
+            model: {
+              providerID: String(info.providerID ?? "provider"),
+              id: String(info.modelID ?? "model"),
+            },
+            cost: typeof info.cost === "number" ? info.cost : undefined,
+            tokens: info.tokens,
+            content: oldParts.map((partValue) => {
+              const part = record(partValue);
+              if (part.type !== "tool")
+                return { type: "text" as const, text: String(part.text ?? "") };
+              const state = record(part.state);
+              return {
+                type: "tool" as const,
+                id: String(part.callID ?? "tool"),
+                name: String(part.tool ?? "tool"),
+                state: {
+                  ...state,
+                  content: Array.isArray(state.content)
+                    ? state.content
+                    : [{ type: "text", text: "" }],
+                },
+              };
+            }),
+          };
+        }
+        return { type: "user" as const, id: String(info.id ?? "user"), text: "" };
+      }),
+      cursor: { next: null },
+    };
+  };
+  return {
+    ...legacy,
+    message: { list: ({ sessionID }: { sessionID: string }) => messages(sessionID) },
+    session: {
+      active: async () => {
+        const response = record(await legacy.session.status?.());
+        if (response.error) throw response.error;
+        const statuses = record(response.data);
+        return Object.fromEntries(
+          Object.entries(statuses)
+            .filter(([, value]) =>
+              ["busy", "retry", "running"].includes(String(record(value).type)),
+            )
+            .map(([id]) => [id, { type: "running" }]),
+        );
+      },
+    },
+  } as unknown as OpenCodeClient;
+}
+
+function assistantEntries(client: LegacyFixtureClient, sessionId: string, signal?: AbortSignal) {
+  return assistantEntriesV2(v2Client(client), sessionId, signal);
+}
+function currentRunEntries(client: LegacyFixtureClient, sessionId: string, taskId: string) {
+  return currentRunEntriesV2(v2Client(client), sessionId, taskId);
+}
+function lastAssistantEntry(client: LegacyFixtureClient, sessionId: string) {
+  return lastAssistantEntryV2(v2Client(client), sessionId);
+}
+function deriveTaskStatus(
+  client: LegacyFixtureClient,
+  sessionId: string,
+  taskId: string,
+  options?: Parameters<typeof deriveTaskStatusV2>[3],
+) {
+  return deriveTaskStatusV2(v2Client(client), sessionId, taskId, options);
+}
+
 describe("clientForServer", () => {
   beforeEach(() => {
     killAllServers();
-    createOpencodeClientMock.mockReset();
+    makeClientMock.mockReset();
   });
 
   it("returns undefined when the server id is unknown", () => {
     expect(clientForServer("missing")).toBeUndefined();
-    expect(createOpencodeClientMock).not.toHaveBeenCalled();
+    expect(makeClientMock).not.toHaveBeenCalled();
   });
 
   it("builds a client from the registered server's baseUrl", () => {
     const fakeClient = { fake: true };
-    createOpencodeClientMock.mockReturnValue(fakeClient);
+    makeClientMock.mockReturnValue(fakeClient);
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
 
     const client = clientForServer("srv-1");
 
     expect(client).toBe(fakeClient);
-    expect(createOpencodeClientMock).toHaveBeenCalledWith({
+    expect(makeClientMock).toHaveBeenCalledWith({
       baseUrl: "http://127.0.0.1:4096",
       fetch: expect.any(Function),
     });
   });
 
-  it("binds server overrides and task clients to their selected project directories", () => {
+  it("creates task clients from the registered server without global directory headers", () => {
     const fakeClient = { fake: true };
-    createOpencodeClientMock.mockReturnValue(fakeClient);
+    makeClientMock.mockReturnValue(fakeClient);
     registerServer({
       serverId: "srv-directory",
       baseUrl: "http://127.0.0.1:4096",
@@ -62,10 +166,9 @@ describe("clientForServer", () => {
     });
     const runClient = clientForServer("srv-directory", "/worktrees/task-one");
     expect(runClient).toBe(fakeClient);
-    expect(createOpencodeClientMock).toHaveBeenLastCalledWith({
+    expect(makeClientMock).toHaveBeenLastCalledWith({
       baseUrl: "http://127.0.0.1:4096",
       fetch: expect.any(Function),
-      directory: "/worktrees/task-one",
     });
 
     registerTask({
@@ -75,12 +178,140 @@ describe("clientForServer", () => {
       directory: "/worktrees/task-two/package",
     });
     expect(clientForTask("directory-task")).toEqual({ client: fakeClient, sessionId: "session-1" });
-    expect(createOpencodeClientMock).toHaveBeenLastCalledWith({
+    expect(makeClientMock).toHaveBeenLastCalledWith({
       baseUrl: "http://127.0.0.1:4096",
       fetch: expect.any(Function),
-      directory: "/worktrees/task-two/package",
     });
     removeTask("directory-task");
+  });
+});
+
+describe("v2 assistant message normalization", () => {
+  it("loads each page chronologically and normalizes v2 parts without exposing reasoning", async () => {
+    const pages = [
+      {
+        data: [
+          { type: "user", id: "user-1" },
+          {
+            type: "system",
+            id: "system-1",
+            content: [],
+          },
+          {
+            type: "assistant",
+            id: "assistant-1",
+            parentID: "user-1",
+            time: { created: 1 },
+            model: { providerID: "provider", id: "model" },
+            content: [
+              { type: "reasoning", text: "hidden" },
+              {
+                type: "tool",
+                id: "tool-1",
+                name: "write",
+                state: { status: "streaming", input: '{"path":"out.txt"}' },
+              },
+              {
+                type: "tool",
+                id: "tool-2",
+                name: "shell",
+                state: {
+                  status: "completed",
+                  input: "not-json",
+                  content: [{ type: "text", text: "done" }, { type: "image" }],
+                },
+              },
+              {
+                type: "tool",
+                id: "tool-3",
+                name: "patch",
+                state: { status: "error", input: undefined, error: { message: "failed" } },
+              },
+              {
+                type: "tool",
+                id: "tool-4",
+                name: "shell",
+                state: { status: "error", input: "[]", error: { message: "invalid input" } },
+              },
+              { type: "unknown" },
+            ],
+          },
+        ],
+        cursor: { next: "page-2" },
+      },
+      { data: [], cursor: { next: null } },
+    ];
+    const list = vi.fn(async (input: { cursor?: string; order?: string }) => {
+      if (input.cursor && input.order) throw new Error("Cursor cannot be combined with order");
+      const page = pages.shift();
+      if (!page) throw new Error("expected a message page");
+      return page;
+    });
+    const entries = await assistantEntriesV2({ message: { list } } as never, "session-1");
+    expect(list).toHaveBeenNthCalledWith(
+      1,
+      { sessionID: "session-1", order: "asc" },
+      { signal: undefined },
+    );
+    expect(list).toHaveBeenNthCalledWith(
+      2,
+      { sessionID: "session-1", cursor: "page-2" },
+      { signal: undefined },
+    );
+    expect(entries[0].info.parentID).toBe("user-1");
+    expect(entries[0].parts).toEqual([
+      {
+        type: "tool",
+        tool: "write",
+        callID: "tool-1",
+        state: {
+          status: "pending",
+          input: { path: "out.txt" },
+          output: undefined,
+          error: undefined,
+        },
+      },
+      {
+        type: "tool",
+        tool: "shell",
+        callID: "tool-2",
+        state: { status: "completed", input: {}, output: "done\\n", error: undefined },
+      },
+      {
+        type: "tool",
+        tool: "patch",
+        callID: "tool-3",
+        state: { status: "error", input: {}, output: undefined, error: "failed" },
+      },
+      {
+        type: "tool",
+        tool: "shell",
+        callID: "tool-4",
+        state: { status: "error", input: {}, output: undefined, error: "invalid input" },
+      },
+    ]);
+  });
+
+  it("rejects repeated message cursors and preserves selection variants when restoring", async () => {
+    const list = vi.fn().mockResolvedValue({ data: [], cursor: { next: "repeat" } });
+    await expect(assistantEntriesV2({ message: { list } } as never, "session-1")).rejects.toThrow(
+      "repeated cursor",
+    );
+    const switchAgent = vi.fn();
+    const switchModel = vi.fn();
+    await restoreSessionSelection({ session: { switchAgent, switchModel } } as never, "session-1", {
+      agent: "plan",
+      model: { providerID: "anthropic", id: "model", variant: "thinking" },
+    });
+    expect(switchAgent).toHaveBeenCalledWith({ sessionID: "session-1", agent: "plan" });
+    expect(switchModel).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      model: { providerID: "anthropic", id: "model", variant: "thinking" },
+    });
+    const noSelection = { switchAgent: vi.fn(), switchModel: vi.fn() };
+    await restoreSessionSelection({ session: noSelection } as never, "session-1", {});
+    expect(noSelection.switchAgent).not.toHaveBeenCalled();
+    expect(noSelection.switchModel).not.toHaveBeenCalled();
   });
 });
 
@@ -91,6 +322,43 @@ describe("fetchWithDeadline", () => {
     const result = await fetchWithDeadline(new Request("http://localhost"));
     expect(result).toBe(response);
     expect(fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it("annotates structured HTTP errors and preserves malformed error responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: "invalid" }), {
+            status: 422,
+            statusText: "Unprocessable Entity",
+            headers: { "content-length": "999", "transfer-encoding": "chunked" },
+          }),
+        )
+        .mockResolvedValueOnce(new Response("not-json", { status: 500 })),
+    );
+    const structured = await fetchWithDeadline(new Request("http://localhost"));
+    expect(structured.status).toBe(422);
+    expect(structured.headers.has("content-length")).toBe(false);
+    expect(structured.headers.has("transfer-encoding")).toBe(false);
+    expect(await structured.json()).toEqual({ error: "invalid", response: { status: 422 } });
+    const malformed = await fetchWithDeadline(new Request("http://localhost"));
+    expect(await malformed.text()).toBe("not-json");
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves an already-aborted request signal", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before dispatch"));
+    const fetchMock = vi.fn((request: Request) => Promise.reject(request.signal.reason));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      fetchWithDeadline(new Request("http://localhost", { signal: controller.signal })),
+    ).rejects.toThrow("cancelled before dispatch");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0].signal.aborted).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -151,7 +419,7 @@ describe("isTerminalTaskStatus", () => {
 describe("clientForTask", () => {
   beforeEach(() => {
     killAllServers();
-    createOpencodeClientMock.mockReset();
+    makeClientMock.mockReset();
     removeTask("task-1");
   });
 
@@ -166,7 +434,7 @@ describe("clientForTask", () => {
 
   it("resolves the client and session id for a known task", () => {
     const fakeClient = { fake: true };
-    createOpencodeClientMock.mockReturnValue(fakeClient);
+    makeClientMock.mockReturnValue(fakeClient);
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
     registerTask({ taskId: "task-1", serverId: "srv-1", sessionId: "session-1" });
 
@@ -214,7 +482,8 @@ describe("lastAssistantEntry", () => {
 
     const entry = await lastAssistantEntry(client as never, "session-1");
 
-    expect(entry).toEqual({ info: newestAssistant.info, parts: newestAssistant.parts });
+    expect(entry?.info.id).toBe("new");
+    expect(entry?.parts).toEqual([{ type: "text", text: "" }]);
   });
 });
 

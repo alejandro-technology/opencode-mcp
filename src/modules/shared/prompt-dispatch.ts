@@ -1,14 +1,23 @@
 export type PromptDispatchOutcome =
-  | { state: "accepted" }
+  | { state: "accepted"; response?: unknown }
   | { state: "rejected"; status: number; error: string }
   | { state: "uncertain"; status?: number; error: string };
 
 function responseStatus(value: unknown): number | undefined {
-  if (typeof value !== "object" || value === null || !("response" in value)) return undefined;
-  const response = value.response;
-  if (typeof response !== "object" || response === null || !("status" in response))
-    return undefined;
-  return typeof response.status === "number" ? response.status : undefined;
+  if (typeof value !== "object" || value === null) return undefined;
+  if ("response" in value) {
+    const response = value.response;
+    if (typeof response === "object" && response !== null && "status" in response) {
+      if (typeof response.status === "number") return response.status;
+    }
+  }
+  if ("cause" in value) {
+    const cause = value.cause;
+    if (typeof cause === "object" && cause !== null && "status" in cause) {
+      if (typeof cause.status === "number") return cause.status;
+    }
+  }
+  return undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -29,7 +38,9 @@ export async function sendPromptAndClassify(
       !("error" in response) ||
       !response.error
     )
-      return { state: "accepted" };
+      return typeof response === "object" && response !== null && "id" in response
+        ? { state: "accepted", response }
+        : { state: "accepted" };
 
     const status = responseStatus(response);
     const error = errorMessage(response.error);
@@ -37,6 +48,10 @@ export async function sendPromptAndClassify(
       return { state: "rejected", status, error };
     return { state: "uncertain", ...(status === undefined ? {} : { status }), error };
   } catch (error) {
-    return { state: "uncertain", error: errorMessage(error) };
+    const status = responseStatus(error);
+    const message = errorMessage(error);
+    if (status !== undefined && status >= 400 && status < 500)
+      return { state: "rejected", status, error: message };
+    return { state: "uncertain", ...(status === undefined ? {} : { status }), error: message };
   }
 }

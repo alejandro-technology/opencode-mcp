@@ -20,6 +20,7 @@ import {
   registerPermissionSession,
   unregisterPermissionSession,
 } from "../shared/permission-scopes.js";
+import { externalDirectoryPermission } from "../shared/permissions.js";
 import { sendPromptAndClassify } from "../shared/prompt-dispatch.js";
 import { observeRun } from "../shared/run-observer.js";
 import { getServer } from "../shared/server-registry.js";
@@ -167,34 +168,71 @@ export function registerOpencodeStartTask(server: McpServer) {
           });
         if (parsedModel) {
           const requested = parsedModel;
-          // Validate against the server's real provider/model catalog: promptAsync is
-          // fire-and-forget, so an unknown model would otherwise fail silently and the
-          // task would look stuck forever. Skip validation if the catalog is unavailable.
-          const providersRes = await client.config.providers();
-          const providers = providersRes.data?.providers;
-          if (providers) {
-            const provider = providers.find((p) => p.id === requested.providerID);
-            if (!provider || !(requested.modelID in provider.models)) {
-              return jsonError({
-                server_id,
-                status: "unknown_model",
-                model,
-                ...(workspaceMetadata.managed
-                  ? { workspace: workspaceMetadata, workspace_id: workspaceId }
-                  : {}),
-                message:
-                  "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents (or from available_models below) instead of guessing",
-                available_models: providers.flatMap((p) =>
-                  Object.keys(p.models).map((m) => `${p.id}/${m}`),
-                ),
-              });
-            }
+          // Validate against the server's real model catalog before asynchronous dispatch;
+          // a known missing model would otherwise leave a task pending without a useful error.
+          let available: Array<{ providerID: string; id: string }> | undefined;
+          try {
+            const modelsRes = await client.model.list({ location: { directory: workspace } });
+            available = modelsRes.data ?? [];
+          } catch {
+            // The provider catalog may be temporarily unavailable; prompt dispatch remains async.
+          }
+          if (
+            available &&
+            !available.some(
+              (item) => item.providerID === requested.providerID && item.id === requested.modelID,
+            )
+          ) {
+            return jsonError({
+              server_id,
+              status: "unknown_model",
+              model,
+              ...(workspaceMetadata.managed
+                ? { workspace: workspaceMetadata, workspace_id: workspaceId }
+                : {}),
+              message:
+                "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents instead of guessing",
+              available_models: available.map((item) => `${item.providerID}/${item.id}`),
+            });
           }
         }
 
-        const created = await client.session.create({ body: { title: prompt.slice(0, 60) } });
+        const agents = await client.agent.list({ location: { directory: workspace } });
+        const configEntries = await client.config.get({ location: { directory: workspace } });
+        const configuredAgent = [...configEntries]
+          .reverse()
+          .filter((entry) => entry.type === "document")
+          .map((entry) => entry.info.default_agent)
+          .find((item): item is string => Boolean(item));
+        const selectedAgent =
+          agent ??
+          configuredAgent ??
+          (agents.data.some((item) => item.id === "build")
+            ? "build"
+            : agents.data.find((item) => item.mode === "primary")?.id);
+        if (selectedAgent && !agents.data.some((item) => item.id === selectedAgent)) {
+          return jsonError({
+            server_id,
+            status: agent ? "unknown_agent" : "default_agent_unavailable",
+            agent: selectedAgent,
+            available_agents: agents.data.map((item) => item.id),
+          });
+        }
+        const selectedAgentInfo = agents.data.find((item) => item.id === selectedAgent);
+        const defaultModel = selectedAgentInfo?.model
+          ? { ...selectedAgentInfo.model }
+          : (await client.model.default({ location: { directory: workspace } })).data;
+        const created = await client.session.create({
+          title: prompt.slice(0, 60),
+          location: { directory: workspace },
+          ...(selectedAgent ? { agent: selectedAgent } : {}),
+          ...(parsedModel
+            ? { model: { providerID: parsedModel.providerID, id: parsedModel.modelID } }
+            : {}),
+          permissions: [externalDirectoryPermission(server.permissionPolicy ?? "read-only")],
+        });
         if (sdkResponseError(created)) throw sdkResponseError(created);
-        const sessionId = created.data?.id;
+        const sessionId = created.id;
         if (!sessionId) {
           return jsonError({
             server_id,
@@ -262,6 +300,12 @@ export function registerOpencodeStartTask(server: McpServer) {
           serverId: server_id,
           sessionId,
           directory: workspace,
+          agent: created.agent ?? selectedAgent,
+          model: created.model
+            ? { ...created.model }
+            : defaultModel
+              ? { ...defaultModel }
+              : undefined,
           workspace: workspaceMetadata,
           workspaceId,
           createdAt: startedAt,
@@ -272,15 +316,7 @@ export function registerOpencodeStartTask(server: McpServer) {
         if (workspaceId) associateManagedWorkspaceTask(workspaceId, taskId);
 
         const outcome = await sendPromptAndClassify(() =>
-          client.session.promptAsync({
-            path: { id: sessionId },
-            body: {
-              messageID: messageId,
-              parts: [{ type: "text", text: prompt }],
-              ...(agent ? { agent } : {}),
-              ...(parsedModel ? { model: parsedModel } : {}),
-            },
-          }),
+          client.session.prompt({ sessionID: sessionId, id: messageId, text: prompt }),
         );
         if (outcome.state === "rejected") {
           if (workspaceId) {
@@ -312,6 +348,10 @@ export function registerOpencodeStartTask(server: McpServer) {
           });
         }
         run.dispatchState = outcome.state;
+        if (outcome.state === "accepted") {
+          const inbox = outcome.response as { id?: unknown } | undefined;
+          if (typeof inbox?.id === "string") run.inboxId = inbox.id;
+        }
         if (outcome.state === "uncertain") run.dispatchError = outcome.error;
         observeRun(taskId, runId);
 

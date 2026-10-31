@@ -1,12 +1,10 @@
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { createOpencodeClient } from "@opencode-ai/sdk";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureParent = tmpdir();
@@ -36,15 +34,23 @@ async function main() {
   const fixture = await mkdtemp(path.join(fixtureParent, "opencode-mcp-smoke-"));
   const workspaceCache = path.join(fixture, "managed-worktrees");
   await mkdir(workspaceCache, { recursive: true });
-  const child = spawn(process.execPath, [path.join(repository, "build/src/index.js")], {
-    cwd: fixture,
-    stdio: ["pipe", "pipe", "inherit"],
-    env: {
-      ...process.env,
-      OPENCODE_MCP_WORKSPACE_DIR: workspaceCache,
-      OPENCODE_MCP_EXTERNAL_DIR: "read-only",
+  const sourceMode = process.argv.includes("--source");
+  const entrypoint = sourceMode
+    ? path.join(repository, "src/index.ts")
+    : path.join(repository, "build/src/index.js");
+  const child = spawn(
+    sourceMode ? "pnpx" : process.execPath,
+    sourceMode ? ["tsx", entrypoint] : [entrypoint],
+    {
+      cwd: sourceMode ? repository : fixture,
+      stdio: ["pipe", "pipe", "inherit"],
+      env: {
+        ...process.env,
+        OPENCODE_MCP_WORKSPACE_DIR: workspaceCache,
+        OPENCODE_MCP_EXTERNAL_DIR: "read-only",
+      },
     },
-  });
+  );
   let id = 0;
   const waiting = new Map<
     number,
@@ -114,46 +120,52 @@ async function main() {
     child.stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
     );
-    const started = await call("opencode_start_server", { port: await findFreePort() });
+    const started = await call("opencode_start_server", {
+      port: await findFreePort(),
+      directory: fixture,
+    });
     const serverId = String(started.server_id ?? "");
     if (!serverId) throw new Error(`server did not start: ${JSON.stringify(started)}`);
-    const client = createOpencodeClient({ baseUrl: String(started.baseUrl) });
-    const probeSession = await client.session.create({ body: { title: "message id wire probe" } });
-    const probeSessionId = probeSession.data?.id;
-    if (!probeSessionId) throw new Error("message ID probe session could not be created");
-    const bareIdProbe = await client.session.promptAsync({
-      path: { id: probeSessionId },
-      body: {
-        messageID: randomUUID(),
-        parts: [{ type: "text", text: "non-billable identifier validation probe" }],
-        model: { providerID: "__phase2_invalid_provider__", modelID: "__phase2_invalid_model__" },
-      },
+    const invalidModel = await callAllowError("opencode_start_task", {
+      server_id: serverId,
+      model: "__opencode_mcp_invalid_provider__/__opencode_mcp_invalid_model__",
+      prompt: "This must be rejected before dispatch and never invoke a model.",
     });
-    const bareIdStatus = bareIdProbe.response?.status;
-    if (bareIdStatus === undefined) throw new Error("message ID probe returned no HTTP status");
-    const bareIdError = JSON.stringify(bareIdProbe.error ?? null);
-    const messageIdContractPassed =
-      bareIdStatus === 400 && bareIdError.includes("Expected a string starting with");
-    await client.session.abort({ path: { id: probeSessionId } }).catch(() => undefined);
-    if (process.argv.includes("--message-id-only")) {
+    const invalidAgent = await callAllowError("opencode_start_task", {
+      server_id: serverId,
+      agent: "__opencode_mcp_invalid_agent__",
+      prompt: "This must be rejected before dispatch and never invoke a model.",
+    });
+    const contractPassed =
+      invalidModel.status === "unknown_model" && invalidAgent.status === "unknown_agent";
+    if (process.argv.includes("--contract-only") || process.argv.includes("--message-id-only")) {
       console.log(
         JSON.stringify(
           {
-            bare_uuid_http_status: bareIdStatus,
-            raw_error: bareIdError,
-            passed: messageIdContractPassed,
+            invalid_model_status: invalidModel.status,
+            invalid_agent_status: invalidAgent.status,
+            passed: contractPassed,
           },
           null,
           2,
         ),
       );
       await call("opencode_stop_server", { server_id: serverId });
-      if (!messageIdContractPassed) throw new Error("OpenCode message ID contract changed");
+      if (!contractPassed) throw new Error("OpenCode model/agent validation contract changed");
       return;
     }
-    const agents = await call("opencode_list_agents", { server_id: serverId });
-    const available = JSON.stringify(agents);
-    if (!available.includes(model)) throw new Error(`required exact model ${model} is unavailable`);
+    if (!contractPassed) throw new Error("OpenCode rejected-model/agent contract failed");
+    const agents = (await call("opencode_list_agents", { server_id: serverId })) as {
+      models?: {
+        providers?: Array<{ provider?: string; models?: Array<{ id?: string }> }>;
+      };
+    };
+    const modelRefs = (agents.models?.providers ?? []).flatMap(
+      (provider: { provider?: string; models?: Array<{ id?: string }> }) =>
+        (provider.models ?? []).map((item) => `${provider.provider}/${item.id}`),
+    );
+    if (!modelRefs.includes(model))
+      throw new Error(`required exact model ${model} is unavailable: ${modelRefs.join(", ")}`);
 
     const target = "phase2-smoke-created.txt";
     const countFile = "phase2-smoke-check-count.txt";
@@ -220,6 +232,10 @@ async function main() {
       usagePassed &&
       count === "1" &&
       targetContents.trimEnd() === "execution report smoke";
+    if (!passed)
+      throw new Error(
+        `initial execution-report smoke failed: ${JSON.stringify({ waited, first, count, targetContents })}`,
+      );
     const firstRunId = String(start.run_id ?? "");
     const continuation = await call("opencode_continue_task", {
       task_id: taskId,
@@ -250,13 +266,13 @@ async function main() {
     const failed =
       (failedResult.verification as { state?: string } | undefined)?.state === "failed" &&
       JSON.stringify(historicResult) === firstSerialized;
+    const lateWriteTarget = "phase2-smoke-cancelled-file.txt";
     const cancellationRun = await call("opencode_continue_task", {
       task_id: taskId,
       model,
       agent: "build",
-      prompt:
-        "Do not edit any files. Start a 20-second sleep using the bash tool and only reply after the sleep finishes.",
-      expected_changes: [{ path: "phase2-smoke-cancelled-file.txt", change: "created" }],
+      prompt: `Do not edit any files before the sleep. Use the bash tool to sleep for 20 seconds, then create ${lateWriteTarget} with exactly the text "late write". Reply only after the file is saved.`,
+      expected_changes: [{ path: lateWriteTarget, change: "created" }],
     });
     const cancellation = await call("opencode_cancel_task", { task_id: taskId });
     const cancellationWait = await call(
@@ -271,9 +287,18 @@ async function main() {
       70_000,
     );
     const cancellationResult = await call("opencode_get_task_result", { task_id: taskId });
+    const lateWriteBeforeSettle = await readFile(path.join(fixture, lateWriteTarget), "utf8").catch(
+      () => "missing",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const lateWriteAfterSettle = await readFile(path.join(fixture, lateWriteTarget), "utf8").catch(
+      () => "missing",
+    );
     const cancelled =
       cancellation.status === "cancelled" &&
-      (cancellationResult.verification as { state?: string } | undefined)?.state === "cancelled";
+      (cancellationResult.verification as { state?: string } | undefined)?.state === "cancelled" &&
+      lateWriteBeforeSettle === "missing" &&
+      lateWriteAfterSettle === "missing";
 
     const gitSource = path.join(fixture, "worktree-source");
     const nestedSource = path.join(gitSource, "packages", "app");
@@ -305,7 +330,7 @@ async function main() {
         base_ref: baseCommit,
         model,
         agent: "build",
-        prompt: `${readExternal ? `First use the read tool on ${path.join(nestedSource, "shared.txt")} and report its exact contents in your final response. ` : ""}Change shared.txt so its exact contents are ${JSON.stringify(content)}. Do not change any other file. Reply after the edit.`,
+        prompt: `${readExternal ? `First read the external source file ${path.join(nestedSource, "shared.txt")} and report its exact contents in your final response. That external file is READ-ONLY and is NOT the file to modify. ` : ""}Your session working directory is a managed worktree. Read ./shared.txt in that working directory, then replace its ENTIRE contents with ${JSON.stringify(content)}. Edit only this worktree-relative ./shared.txt, never the external source file. Do not append or change any other file. Reply after the edit.`,
         expected_changes: [{ path: "shared.txt", change: "modified" }],
       });
     const [worktreeOne, worktreeTwo] = await Promise.all([
@@ -355,11 +380,12 @@ async function main() {
     const worktreeTwoPath = secondWorkspace.execution_directory;
     const worktreeOneContents = await readFile(path.join(worktreeOnePath, "shared.txt"), "utf8");
     const worktreeTwoContents = await readFile(path.join(worktreeTwoPath, "shared.txt"), "utf8");
+    const continuationContents = "continued worktree content\n";
     const continuationWorktree = await call("opencode_continue_task", {
       task_id: worktreeOneId,
       model,
       agent: "build",
-      prompt: "Change shared.txt to exactly continued worktree content. Do not change other files.",
+      prompt: `Read ./shared.txt in your session working directory (the managed worktree), then replace its ENTIRE contents with ${JSON.stringify(continuationContents)}. Do not append, edit the external source file, or change any other file.`,
       expected_changes: [{ path: "shared.txt", change: "modified" }],
     });
     const worktreeContinuationWait = await call(
@@ -374,6 +400,10 @@ async function main() {
       100_000,
     );
     const worktreeOneFinal = await call("opencode_get_task_result", { task_id: worktreeOneId });
+    const worktreeContinuationContents = await readFile(
+      path.join(worktreeOnePath, "shared.txt"),
+      "utf8",
+    );
     const dirtyCleanupOne = await callAllowError("opencode_cleanup_workspace", {
       workspace_id: firstWorkspace.workspace_id,
     });
@@ -403,6 +433,8 @@ async function main() {
       firstWorkspace.source_dirty === true &&
       worktreeOneContents === "first isolated worktree\n" &&
       worktreeTwoContents === "second isolated worktree\n" &&
+      worktreeContinuationContents === continuationContents &&
+      worktreeOneInitial.status === "completed" &&
       String(worktreeOneInitial.result).includes("source dirty sentinel") &&
       (worktreeOneInitial.usage as { snapshot_kind?: string } | undefined)?.snapshot_kind ===
         "run_finalization" &&
@@ -426,11 +458,6 @@ async function main() {
           server_id: serverId,
           task_id: taskId,
           run_id: start.run_id,
-          caller_message_id_probe: {
-            bare_uuid_http_status: bareIdStatus,
-            raw_error: bareIdError,
-            rejected_before_ack: messageIdContractPassed,
-          },
           wait: waited,
           first_result: first,
           repeated_result_identical: firstSerialized === secondSerialized,
@@ -450,6 +477,8 @@ async function main() {
             cancel: cancellation,
             wait: cancellationWait,
             result: cancellationResult,
+            late_write_before_settle: lateWriteBeforeSettle,
+            late_write_after_settle: lateWriteAfterSettle,
             passed: cancelled,
           },
           managed_worktrees: {
@@ -470,6 +499,7 @@ async function main() {
             continuation_workspace_id: (continuationWorktree.workspace as { workspace_id: string })
               .workspace_id,
             continuation_result: worktreeOneFinal,
+            continuation_file_contents: worktreeContinuationContents,
             dirty_cleanup_refusals: [dirtyCleanupOne.status, dirtyCleanupTwo.status],
             explicit_cleanup: [cleanupOne.status, cleanupTwo.status],
             cached_historical_result_after_cleanup: cachedAfterCleanup,
@@ -485,7 +515,7 @@ async function main() {
       ),
     );
     await call("opencode_stop_server", { server_id: serverId });
-    if (!passed || !failed || !cancelled || !messageIdContractPassed || !worktreeSmokePassed)
+    if (!passed || !failed || !cancelled || !contractPassed || !worktreeSmokePassed)
       process.exitCode = 1;
   } finally {
     child.kill("SIGTERM");

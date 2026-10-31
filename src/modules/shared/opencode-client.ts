@@ -1,26 +1,55 @@
-import {
-  type AssistantMessage,
-  createOpencodeClient,
-  type OpencodeClient,
-  type Part,
-} from "@opencode-ai/sdk";
+import { type ModelRef, OpenCode, type OpenCodeClient } from "@opencode/client";
 import { buildExecutionUsage, type ExecutionUsageSnapshot } from "./execution-usage.js";
 import { getServer } from "./server-registry.js";
 import { getTask } from "./task-registry.js";
 
 const SDK_REQUEST_TIMEOUT_MS = 30_000;
 
+function parseToolInput(input: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(input);
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 export async function fetchWithDeadline(request: Request): Promise<Response> {
   const controller = new AbortController();
   const abortFromRequest = () => controller.abort(request.signal.reason);
-  request.signal.addEventListener("abort", abortFromRequest, { once: true });
+  if (request.signal.aborted) abortFromRequest();
+  else request.signal.addEventListener("abort", abortFromRequest, { once: true });
   const timer = setTimeout(
     () => controller.abort(new Error("OpenCode request deadline exceeded")),
     SDK_REQUEST_TIMEOUT_MS,
   );
   timer.unref?.();
   try {
-    return await fetch(new Request(request, { signal: controller.signal }));
+    const response = await fetch(new Request(request, { signal: controller.signal }));
+    if (response.status < 400) return response;
+    const body = await response.text();
+    let annotatedBody = body;
+    try {
+      const value: unknown = JSON.parse(body);
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        annotatedBody = JSON.stringify({
+          ...value,
+          response: { status: response.status },
+        });
+      }
+    } catch {
+      // The official client will classify a malformed error response itself.
+    }
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    headers.delete("transfer-encoding");
+    return new Response(annotatedBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   } finally {
     clearTimeout(timer);
     request.signal.removeEventListener("abort", abortFromRequest);
@@ -28,21 +57,25 @@ export async function fetchWithDeadline(request: Request): Promise<Response> {
 }
 
 /** Build an HTTP client for a tracked server, or undefined if the id is unknown. */
-export function clientForServer(serverId: string, directory?: string): OpencodeClient | undefined {
+export function clientForServer(serverId: string, directory?: string): OpenCodeClient | undefined {
   const server = getServer(serverId);
   if (!server) return undefined;
-  const selectedDirectory = directory ?? server.directory;
-  return createOpencodeClient({
+  const password = server.password;
+  const headers = password
+    ? { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` }
+    : undefined;
+  void directory;
+  return OpenCode.make({
     baseUrl: server.baseUrl,
-    fetch: fetchWithDeadline,
-    ...(selectedDirectory ? { directory: selectedDirectory } : {}),
+    fetch: (input, init) => fetchWithDeadline(new Request(input, init)),
+    ...(headers ? { headers } : {}),
   });
 }
 
 /** Resolve a task to its server client and session id, or undefined if unknown. */
 export function clientForTask(
   taskId: string,
-): { client: OpencodeClient; sessionId: string } | undefined {
+): { client: OpenCodeClient; sessionId: string } | undefined {
   const task = getTask(taskId);
   if (!task) return undefined;
   const client = clientForServer(task.serverId, task.directory);
@@ -50,9 +83,51 @@ export function clientForTask(
   return { client, sessionId: task.sessionId };
 }
 
+export interface AssistantMessage {
+  id: string;
+  role: "assistant";
+  time: { created: number; completed?: number };
+  error?: { name: string; message?: string };
+  parentID?: string;
+  providerID?: string;
+  modelID?: string;
+  cost?: number;
+  tokens?: unknown;
+}
+
+export type Part =
+  | { type: "text"; text: string }
+  | {
+      type: "tool";
+      tool: string;
+      callID: string;
+      state: {
+        status: "pending" | "running" | "completed" | "error";
+        input: Record<string, unknown>;
+        output?: string;
+        error?: string;
+      };
+    };
+
 export interface AssistantEntry {
   info: AssistantMessage;
   parts: Part[];
+}
+
+export interface SessionSelection {
+  agent?: string;
+  model?: ModelRef;
+}
+
+export async function restoreSessionSelection(
+  client: OpenCodeClient,
+  sessionId: string,
+  selection: SessionSelection,
+): Promise<void> {
+  if (selection.agent)
+    await client.session.switchAgent({ sessionID: sessionId, agent: selection.agent });
+  if (selection.model)
+    await client.session.switchModel({ sessionID: sessionId, model: selection.model });
 }
 
 export function isTerminalTaskStatus(status: string): boolean {
@@ -67,17 +142,77 @@ export function sdkResponseError(response: unknown): unknown {
 
 /** Fetch every assistant message (with its parts) for a session, oldest first. */
 export async function assistantEntries(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<AssistantEntry[]> {
-  const res = await client.session.messages({ path: { id: sessionId }, signal });
-  if (sdkResponseError(res)) throw sdkResponseError(res);
+  const messages = [];
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+  do {
+    const page = await client.message.list(
+      { sessionID: sessionId, ...(cursor ? { cursor } : { order: "asc" }) },
+      { signal },
+    );
+    messages.push(...page.data);
+    const nextCursor = page.cursor.next ?? undefined;
+    if (nextCursor && seenCursors.has(nextCursor))
+      throw new Error("OpenCode message pagination returned a repeated cursor");
+    if (nextCursor) seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (cursor);
+
   const entries: AssistantEntry[] = [];
-  for (const message of res.data ?? []) {
-    if (message.info.role === "assistant") {
-      entries.push({ info: message.info, parts: message.parts });
+  let currentUserMessageID: string | undefined;
+  for (const message of messages) {
+    if (message.type === "user") {
+      currentUserMessageID = message.id;
+      continue;
     }
+    if (message.type !== "assistant") continue;
+    const info = {
+      id: message.id,
+      role: "assistant" as const,
+      time: { created: message.time.created, completed: message.time.completed },
+      error: message.error
+        ? { name: message.error.type, message: message.error.message }
+        : undefined,
+      parentID:
+        typeof message.metadata?.parentID === "string"
+          ? message.metadata.parentID
+          : currentUserMessageID,
+      providerID: message.model.providerID,
+      modelID: message.model.id,
+      cost: message.cost,
+      tokens: message.tokens,
+    } as AssistantMessage;
+    const parts = message.content.flatMap((part): Part[] => {
+      if (part.type === "text") return [{ type: "text" as const, text: part.text } as Part];
+      if (part.type === "reasoning") return [];
+      if (part.type === "tool") {
+        const state = part.state;
+        const input = typeof state.input === "string" ? parseToolInput(state.input) : state.input;
+        const mapped = {
+          status: state.status === "streaming" ? "pending" : state.status,
+          input: input ?? {},
+          output:
+            state.status === "completed"
+              ? state.content.map((c) => (c.type === "text" ? c.text : "")).join("\\n")
+              : undefined,
+          error: state.status === "error" ? state.error.message : undefined,
+        };
+        return [
+          {
+            type: "tool" as const,
+            tool: part.name,
+            callID: part.id,
+            state: mapped,
+          } as unknown as Part,
+        ];
+      }
+      return [];
+    }) as Part[];
+    entries.push({ info, parts });
   }
   return entries;
 }
@@ -86,13 +221,11 @@ function entriesForCurrentRun(entries: AssistantEntry[], taskId: string): Assist
   const task = getTask(taskId);
   const run = task?.runs?.find((item) => item.run_id === task.currentRunId);
   if (!run) return entries;
-  return entries.filter(
-    (entry) => (entry.info as AssistantMessage & { parentID?: string }).parentID === run.message_id,
-  );
+  return entries.filter((entry) => entry.info.parentID === run.message_id);
 }
 
 export async function currentRunEntries(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   sessionId: string,
   taskId: string,
 ): Promise<AssistantEntry[]> {
@@ -106,7 +239,7 @@ export function sessionParts(entries: AssistantEntry[]): Part[] {
 
 /** Fetch the most recent assistant message (with its parts) for a session. */
 export async function lastAssistantEntry(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   sessionId: string,
 ): Promise<AssistantEntry | undefined> {
   return (await assistantEntries(client, sessionId)).at(-1);
@@ -145,7 +278,16 @@ const TEXT_SNIPPET_MAX_LENGTH = 500;
  * and there is no `list` tool. `task` delegates to a subagent, which can write
  * through any of the others.
  */
-const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "bash", "task"]);
+const MUTATING_TOOLS = new Set([
+  "write",
+  "edit",
+  "apply_patch",
+  "bash",
+  "task",
+  "shell",
+  "subagent",
+  "patch",
+]);
 
 /**
  * Whether an assistant turn actually produced anything.
@@ -176,7 +318,7 @@ export const PENDING_STALL_MS = 15_000;
  * mutating without contributing a path.
  */
 function touchedFilePath(input: { [key: string]: unknown }): string | undefined {
-  const filePath = input.filePath;
+  const filePath = input.path ?? input.filePath;
   return typeof filePath === "string" && filePath !== "" ? filePath : undefined;
 }
 
@@ -260,7 +402,7 @@ function usageSnapshot(
 }
 
 async function readObservedEntries(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   sessionId: string,
   signal: AbortSignal | undefined,
   includeUsage: boolean,
@@ -297,7 +439,7 @@ export function deriveAssistantTurnStatus(
  * opencode_wait_for_task so both use identical status derivation.
  */
 export async function deriveTaskStatus(
-  client: OpencodeClient,
+  client: OpenCodeClient,
   sessionId: string,
   taskId: string,
   options?: DeriveTaskStatusOptions,
@@ -337,10 +479,8 @@ export async function deriveTaskStatus(
   }
 
   // The status map only lists sessions that are actively working.
-  const statusRes = await client.session.status({ signal });
-  if (sdkResponseError(statusRes)) throw sdkResponseError(statusRes);
-  const sessionStatus = statusRes.data?.[sessionId];
-  if (sessionStatus?.type === "busy" || sessionStatus?.type === "retry") {
+  const sessionStatus = (await client.session.active({ signal }))[sessionId];
+  if (sessionStatus?.type === "running") {
     if (includeProgress || includeUsage) {
       const observed = await readObservedEntries(client, sessionId, signal, includeUsage);
       const allEntries = observed.entries;

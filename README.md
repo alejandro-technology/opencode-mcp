@@ -8,7 +8,11 @@ An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, C
 
 ## Quick install
 
-Requires **Node.js 18+** and **[OpenCode 1.x](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
+Requires **Node.js 22.18+** and **[OpenCode CLI 2.2.1](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
+
+> **Unreleased CLI 2 migration:** these requirements describe this source checkout, which uses the official `@opencode/client` 2.2.5 client. The published `1.3.1` npm package still targets OpenCode 1.x. To use the migration before release, follow [from-source installation](#option-2--from-source), then restart your MCP host. Installing this MCP does not update your machine's OpenCode CLI.
+
+See the [migration report](docs/migration-opencode-cli2.md) for the diagnosis, implementation decisions, verification evidence, and rollout limitations.
 
 For **Claude Code**:
 
@@ -45,13 +49,19 @@ Delegation workflow and model-selection guidance are provided through the MCP se
 
 Task delegation is asynchronous: `opencode_start_task` returns a `task_id` and `run_id` without waiting, so hosts can start tasks in parallel. Tasks use the selected directory by default; managed Git worktrees are optional. Poll for status and retrieve results separately. If dispatch is uncertain, use the returned IDs to check or cancel the task instead of retrying it.
 
+Continuation `agent` / `model` overrides apply only to that run; the previous session selection is restored after execution settles. Cancellation waits for the session to become idle before releasing its workspace or finalizing its report. If cancellation is still settling, its response retains the task and workspace protection rather than claiming success.
+
+### Agent and model discovery
+
+Copy exact agent handles from `opencode_list_agents`: `agents.all[].name` is the CLI agent ID, while `display_name` is its human-readable label. The legacy `native` / `custom` lists remain available, but CLI 2 does not expose provenance: `classification: "builtin_ids"` means those buckets classify known built-in IDs, not whether an agent was customized. Models remain `{ id, quota }` objects grouped by provider; `models.defaults` reports the CLI's selected default, not a separate default for every provider.
+
 ### Execution reports and caller checks
 
 Start and continuation calls can include `expected_changes` and `checks`. Status and result responses report workspace changes, verification, diagnostics, and evidence; pass a `run_id` to retrieve a historical run. Workspace changes are best-effort evidence, since concurrent writers can make attribution uncertain.
 
 ### Shared directories and managed worktrees
 
-Tasks run in the selected existing directory (`shared`, the default), or in an isolated managed Git worktree based on a commit. Worktrees are kept after execution; use `opencode_cleanup_workspace` with its `workspace_id` after reports are finalized. Cleanup only removes worktrees managed by this server, and dirty worktrees require explicit discard.
+Tasks run in the selected existing directory (`shared`, the default), or in an isolated managed Git worktree based on a commit. Worktrees are kept after execution; use `opencode_cleanup_workspace` with its `workspace_id` after reports are finalized. Cleanup only removes worktrees managed by this server, and dirty worktrees require explicit discard. When asking an agent to read the original source and edit its worktree, distinguish the read-only source path from the worktree-relative edit path; an attempted external write is correctly rejected under the default policy.
 
 ### Usage reporting
 
@@ -63,12 +73,14 @@ Task history and workspace ownership are held in memory for the lifetime of the 
 
 ### Prerequisites
 
-- **Node.js 18+**
-- **[OpenCode 1.x](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
+- **Node.js 22.18+** for runtime and development.
+- **[OpenCode CLI 2.2.1](https://opencode.ai)** installed, on your `PATH`, and configured with at least one provider/model.
 
-The current adapter uses the OpenCode v1 SDK/API and was validated against OpenCode `1.18.34`. OpenCode 2.x is not yet supported.
+The adapter targets CLI `2.2.1` using `@opencode/client` `2.2.5`, verified with the real non-billable contract probe and full smoke using `openai/gpt-6-luna`; OpenCode 1.x is no longer supported. Startup checks the authenticated CLI 2 API and rejects versions outside `>=2.2 <3`; that guard alone is not a compatibility guarantee for other CLI versions. Readiness does not depend on the CLI's startup banner. Each spawned server uses Basic authentication with `OPENCODE_SERVER_PASSWORD` when set, or a generated private password otherwise; MCP tool responses do not expose it.
 
-### Option 1 — npm (recommended)
+### Option 1 — npm (published release)
+
+**The published `1.3.1` package does not include the unreleased CLI 2 migration.** Use [Option 2](#option-2--from-source) for this checkout's behavior.
 
 The package is published as [`mcp-server-opencode`](https://www.npmjs.com/package/mcp-server-opencode). No cloning or building needed — point your MCP host at `npx`:
 
@@ -137,7 +149,9 @@ Then point your MCP host at the built entrypoint:
 }
 ```
 
-Restart your MCP host after editing the config; the `opencode_*` tools should appear in its tool list.
+Restart your MCP host after editing the config; the `opencode_*` tools should appear in its tool list. Rebuild and restart after source updates too: an already-running MCP process keeps its loaded code.
+
+If pnpm 11 reports `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`, a newly published dependency has not reached its release-age threshold. Wait for the threshold to elapse or follow your organization's dependency-review policy; do not disable the global protection just to install this checkout.
 
 ## Configuration
 
@@ -181,7 +195,7 @@ If both are present, the **environment variable takes precedence** over the CLI 
 
 ### Permissions and trust
 
-Headless tasks automatically answer permission prompts. Set `OPENCODE_MCP_EXTERNAL_DIR` to `read-only` (default), `allow`, or `deny` to control external-directory requests. An environment variable takes precedence over an `OPENCODE_MCP_EXTERNAL_DIR=<policy>` CLI argument; explicit OpenCode deny rules remain in effect.
+Headless tasks automatically answer permission prompts for their registered sessions. Set `OPENCODE_MCP_EXTERNAL_DIR` to `read-only` (default), `allow`, or `deny` to control access outside each task's execution directory. An environment variable takes precedence over an `OPENCODE_MCP_EXTERNAL_DIR=<policy>` CLI argument. Only the session's `external_directory` rule is added; other OpenCode tool deny rules are not replaced by a catch-all allow. External read approvals are one-time, and unknown external operations fail closed.
 
 Use this server only with trusted hosts and repositories. Git worktrees isolate source changes, **not OS permissions**: agents and caller-provided checks run as your local user, not in a security sandbox.
 
@@ -212,7 +226,7 @@ Each module ships with a `*.test.ts` Vitest suite under the parallel `tests/` tr
 
 ### Getting started
 
-Use **Node.js 22.18+** for development and smoke tests (native TypeScript execution); CI checks Node.js 22 and 24. The published server retains its Node.js 18+ runtime requirement.
+Use **Node.js 22.18+** for both runtime and development. The official CLI 2 client requires `Promise.withResolvers`, and the smoke harness uses native TypeScript execution. CI checks Node.js 22 and 24.
 
 ```bash
 pnpm install
@@ -227,6 +241,7 @@ pnpm test:coverage  # vitest run --coverage
 pnpm lint           # biome check
 pnpm lint:write     # biome check --write
 pnpm build          # clean tsc build to ./build (also the source typecheck)
+pnpm check:smoke    # typecheck the smoke harness without emitting files
 ```
 
 ### Real OpenCode smoke tests
@@ -234,11 +249,13 @@ pnpm build          # clean tsc build to ./build (also the source typecheck)
 The opt-in smoke harness starts a real OpenCode server and removes its temporary fixtures afterward. It is not part of default CI.
 
 ```bash
-pnpm smoke --message-id-only   # non-billable message-ID contract probe
-pnpm smoke                     # full smoke; requires credentials and may incur model charges
+pnpm smoke --contract-only  # non-billable CLI 2 startup/discovery/input-validation probe
+pnpm smoke                  # full smoke; requires credentials and may incur model charges
 ```
 
-The full smoke covers reports, usage, continuation, cancellation, isolated worktrees, and cleanup. Its default model is `openai/gpt-6-luna`; override it with an exact enabled model ID:
+Both smoke modes typecheck the harness and rebuild first. `--message-id-only` remains an alias for `--contract-only`, but no longer denotes the historical CLI 1 bare-UUID probe. Add `--source` to exercise the `tsx` source entrypoint instead of the build (the source runner requires `pnpx tsx`).
+
+The full smoke covers reports, usage, continuation, cancellation without late writes, scoped external reads, isolated worktrees, exact file contents, and cleanup. Its default model is `openai/gpt-6-luna`; override it with an exact enabled model ID:
 
 ```bash
 OPENCODE_MCP_SMOKE_MODEL=provider/model pnpm smoke

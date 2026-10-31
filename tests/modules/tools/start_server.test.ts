@@ -2,11 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const createOpencodeServerMock = vi.fn();
-const createOpencodeClientMock = vi.fn();
 
-vi.mock("@opencode-ai/sdk", () => ({
+vi.mock("../../../src/modules/shared/opencode-server.js", () => ({
   createOpencodeServer: (...args: unknown[]) => createOpencodeServerMock(...args),
-  createOpencodeClient: (...args: unknown[]) => createOpencodeClientMock(...args),
 }));
 
 vi.mock("node:crypto", () => ({
@@ -14,12 +12,10 @@ vi.mock("node:crypto", () => ({
 }));
 
 const getExternalDirectoryPolicyMock = vi.fn();
-const buildServerConfigMock = vi.fn();
 const startPermissionResponderMock = vi.fn();
 
 vi.mock("../../../src/modules/shared/permissions.js", () => ({
   getExternalDirectoryPolicy: () => getExternalDirectoryPolicyMock(),
-  buildServerConfig: (...args: unknown[]) => buildServerConfigMock(...args),
   startPermissionResponder: (...args: unknown[]) => startPermissionResponderMock(...args),
 }));
 
@@ -31,32 +27,30 @@ const { getServer, killAllServers } = await import(
 describe("opencode_start_server", () => {
   beforeEach(() => {
     createOpencodeServerMock.mockReset();
-    createOpencodeClientMock.mockReset();
     getExternalDirectoryPolicyMock.mockReset();
-    buildServerConfigMock.mockReset();
     startPermissionResponderMock.mockReset();
     killAllServers();
 
     getExternalDirectoryPolicyMock.mockReturnValue("read-only");
-    buildServerConfigMock.mockReturnValue({ permission: { external_directory: "ask" } });
     startPermissionResponderMock.mockReturnValue({ stop: vi.fn(), done: Promise.resolve() });
-    createOpencodeClientMock.mockReturnValue({ fake: "client" });
   });
 
-  it("starts a server with the permission config, registers it, and returns its id", async () => {
+  it("starts a server, registers its private credential, and returns its id", async () => {
     const close = vi.fn();
-    createOpencodeServerMock.mockResolvedValue({ url: "http://127.0.0.1:4096", close });
+    createOpencodeServerMock.mockResolvedValue({
+      url: "http://127.0.0.1:4096",
+      password: "private-password",
+      close,
+    });
     const fake = createFakeMcpServer();
     registerOpencodeStartServer(fake.server);
     const handler = fake.getHandler();
 
     const result = await handler({ port: undefined });
 
-    expect(buildServerConfigMock).toHaveBeenCalledWith("read-only");
     expect(createOpencodeServerMock).toHaveBeenCalledWith({
       hostname: "127.0.0.1",
       port: 4096,
-      config: { permission: { external_directory: "ask" } },
     });
     expect(result).toEqual({
       content: [
@@ -74,6 +68,7 @@ describe("opencode_start_server", () => {
     expect(getServer("generated-uuid")).toMatchObject({
       serverId: "generated-uuid",
       baseUrl: "http://127.0.0.1:4096",
+      password: "private-password",
     });
   });
 
@@ -84,7 +79,6 @@ describe("opencode_start_server", () => {
 
     await fake.getHandler()({ port: undefined });
 
-    expect(createOpencodeClientMock).not.toHaveBeenCalled();
     expect(startPermissionResponderMock).not.toHaveBeenCalled();
     expect(getServer("generated-uuid")).toMatchObject({
       directory: await import("node:fs/promises").then(({ realpath }) => realpath(process.cwd())),
@@ -107,8 +101,11 @@ describe("opencode_start_server", () => {
 
   it("reports the resolved policy back to the caller", async () => {
     getExternalDirectoryPolicyMock.mockReturnValue("deny");
-    buildServerConfigMock.mockReturnValue({ permission: { external_directory: "deny" } });
-    createOpencodeServerMock.mockResolvedValue({ url: "http://127.0.0.1:4096", close: vi.fn() });
+    createOpencodeServerMock.mockResolvedValue({
+      url: "http://127.0.0.1:4096",
+      password: "private-password",
+      close: vi.fn(),
+    });
     const fake = createFakeMcpServer();
     registerOpencodeStartServer(fake.server);
 
@@ -131,7 +128,6 @@ describe("opencode_start_server", () => {
     expect(createOpencodeServerMock).toHaveBeenCalledWith({
       hostname: "127.0.0.1",
       port: 5000,
-      config: { permission: { external_directory: "ask" } },
     });
   });
 

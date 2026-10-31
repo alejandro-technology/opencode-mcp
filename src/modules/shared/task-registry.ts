@@ -1,3 +1,4 @@
+import type { ModelRef } from "@opencode/client";
 import type {
   ExecutionReport,
   ExpectedChange,
@@ -28,13 +29,23 @@ export interface TaskRecord {
   dispatching?: boolean;
   /** Canonical directory inherited by the server process. */
   directory?: string;
+  /** Effective starting session selection for follow-up overrides. */
+  agent?: string;
+  model?: ModelRef;
   workspace?: WorkspaceMetadata;
   workspaceId?: string;
+  /** Failed CLI2 follow-up selection restoration blocks future dispatches until repaired. */
+  pendingSelectionRestore?: { agent?: string; model?: ModelRef };
 }
 
 export interface TaskRunRecord {
   run_id: string;
   message_id: string;
+  /** CLI2 inbox item returned by the asynchronous prompt acknowledgement. */
+  inboxId?: string;
+  /** Session selection to restore after a follow-up that overrides it. */
+  restoreSelection?: { agent?: string; model?: ModelRef };
+  selectionRestored?: boolean;
   startedAt: number;
   cancelledAt?: number;
   report?: ExecutionReport;

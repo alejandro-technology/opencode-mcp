@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Part } from "@opencode-ai/sdk";
 import { z } from "zod";
 import { buildExecutionUsage } from "../shared/execution-usage.js";
 import { jsonError, jsonResult } from "../shared/mcp-result.js";
+import type { Part } from "../shared/opencode-client.js";
 import {
   assistantEntries,
   buildProgress,

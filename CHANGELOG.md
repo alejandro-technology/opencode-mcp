@@ -9,6 +9,26 @@ Releases before `1.2.0` predate this file and are not documented here.
 
 ## Unreleased
 
+### Breaking changes
+
+- Support OpenCode CLI `2.2.1` through the official `@opencode/client` (`^2.2.5`), replacing the legacy `@opencode-ai/sdk`. OpenCode 1.x is no longer a supported target; startup requires the authenticated CLI 2 API and a version in `>=2.2 <3`.
+- Require Node.js `22.18+` at runtime as well as for development and smoke tests.
+
+### Changed
+
+- Authenticate spawned OpenCode servers with a supplied or generated private password, verify the listener's API/version/process identity, and avoid startup-banner matching. Support both built and source-mode launchers without changing the installed CLI or global configuration.
+- Route sessions and discovery through explicit project locations, normalize paginated CLI 2 messages into per-run results/progress/usage, and preserve asynchronous dispatch, historical snapshots, reports, and managed worktrees.
+- Apply continuation agent/model overrides with CLI 2 session selection and restore the prior selection, including model variants, after execution settles. Surface restoration failures rather than silently making overrides persistent.
+- Add canonical `agents.all` and agent display labels to discovery. Retain `native` / `custom` buckets with explicit `builtin_ids` classification, not invented provenance; model defaults now reflect the CLI's selected default.
+- Replace the CLI 1 bare-UUID smoke probe with non-billable `--contract-only` startup/discovery/input validation; retain `--message-id-only` as an alias. Keep the opt-in paid smoke on exact `openai/gpt-6-luna` by default. Verify the migration against real CLI `2.2.1` with contract and full-smoke checks covering reports, usage, history, continuation, cancellation without late writes, scoped external reads, worktrees, and cleanup.
+
+### Fixed
+
+- Reconcile pending owned permission requests after event-stream connection and reconnection. Use narrowly scoped external-directory rules, one-time external read approvals, and fail-closed handling of unidentified external operations without overriding other user tool denies.
+- Wait for interruption cleanup to settle before finalizing cancellation, restoring session selections, or releasing workspace writer leases; also handle queued prompts and preserve protection on uncertain cancellation.
+- Preserve already-aborted request signals and follow CLI 2 pagination cursors without inventing terminal status or missing usage.
+- Typecheck the smoke harness separately in CI and before smoke execution, preventing stale summary variables from surviving the source-only build. Distinguish read-only source paths from worktree edit paths and verify exact continuation file contents in the real smoke.
+
 ## [1.3.1] — 2026-10-28
 
 ### Changed

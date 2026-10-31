@@ -13,7 +13,7 @@ import {
 } from "../shared/execution-report.js";
 import { jsonError, jsonResult } from "../shared/mcp-result.js";
 import { createMessageId } from "../shared/message-id.js";
-import { clientForTask } from "../shared/opencode-client.js";
+import { clientForTask, restoreSessionSelection } from "../shared/opencode-client.js";
 import { sendPromptAndClassify } from "../shared/prompt-dispatch.js";
 import { observeRun } from "../shared/run-observer.js";
 import {
@@ -81,7 +81,7 @@ export function registerOpencodeContinueTask(server: McpServer) {
       const previous = task?.runs?.find((run) => run.run_id === task.currentRunId);
       if (previous && !previous.reportReady)
         return jsonError({ task_id, status: "previous_run_reporting" });
-      if (previous?.report && previous.finalizationError)
+      if (previous?.report && previous.finalizationError && !task.pendingSelectionRestore)
         return jsonError({ task_id, status: "previous_run_unavailable" });
       if (
         previous?.report &&
@@ -118,6 +118,10 @@ export function registerOpencodeContinueTask(server: McpServer) {
 
       let provisionalLease: symbol | undefined;
       try {
+        if (task.pendingSelectionRestore) {
+          await restoreSessionSelection(client, sessionId, task.pendingSelectionRestore);
+          task.pendingSelectionRestore = undefined;
+        }
         const verified = Boolean(expected_changes?.length || checks?.length);
         const lease = task?.directory
           ? await reserveWorkspace(task.directory, verified)
@@ -135,6 +139,51 @@ export function registerOpencodeContinueTask(server: McpServer) {
         } catch (error) {
           baselineError = error instanceof Error ? error.message : String(error);
         }
+        const selected = await client.session.get({ sessionID: sessionId });
+        const previousSelection = {
+          ...((selected.agent ?? task.agent) ? { agent: selected.agent ?? task.agent } : {}),
+          ...((selected.model ?? task.model) ? { model: selected.model ?? task.model } : {}),
+        };
+        if (agent) {
+          const agents = await client.agent.list({ location: { directory: task.directory } });
+          if (!agents.data.some((item) => item.id === agent))
+            return jsonError({
+              task_id,
+              status: "unknown_agent",
+              agent,
+              available_agents: agents.data.map((item) => item.id),
+            });
+        }
+        if (parsedModel) {
+          const models = await client.model.list({ location: { directory: task.directory } });
+          if (
+            !models.data.some(
+              (item) =>
+                item.providerID === parsedModel?.providerID && item.id === parsedModel?.modelID,
+            )
+          )
+            return jsonError({
+              task_id,
+              status: "unknown_model",
+              model,
+              available_models: models.data.map((item) => `${item.providerID}/${item.id}`),
+            });
+        }
+        try {
+          if (agent) await client.session.switchAgent({ sessionID: sessionId, agent });
+          if (parsedModel)
+            await client.session.switchModel({
+              sessionID: sessionId,
+              model: { providerID: parsedModel.providerID, id: parsedModel.modelID },
+            });
+        } catch (error) {
+          try {
+            await restoreSessionSelection(client, sessionId, previousSelection);
+          } catch {
+            task.pendingSelectionRestore = previousSelection;
+          }
+          throw error;
+        }
         const runId = randomUUID();
         const messageId = createMessageId();
         const startedAt = Date.now();
@@ -146,6 +195,7 @@ export function registerOpencodeContinueTask(server: McpServer) {
         const run: TaskRunRecord = {
           run_id: runId,
           message_id: messageId,
+          ...(agent || parsedModel ? { restoreSelection: previousSelection } : {}),
           startedAt,
           baseline,
           baselineError,
@@ -158,18 +208,18 @@ export function registerOpencodeContinueTask(server: McpServer) {
         acceptTaskRun(task_id, run);
         provisionalLease = undefined;
         const outcome = await sendPromptAndClassify(() =>
-          client.session.promptAsync({
-            path: { id: sessionId },
-            body: {
-              messageID: messageId,
-              parts: [{ type: "text", text: prompt }],
-              ...(agent ? { agent } : {}),
-              ...(parsedModel ? { model: parsedModel } : {}),
-            },
-          }),
+          client.session.prompt({ sessionID: sessionId, id: messageId, text: prompt }),
         );
         if (outcome.state === "rejected") {
           rollbackTaskRun(task_id, runId, previousState);
+          if (run.restoreSelection) {
+            try {
+              await restoreSessionSelection(client, sessionId, run.restoreSelection);
+              run.selectionRestored = true;
+            } catch {
+              task.pendingSelectionRestore = run.restoreSelection;
+            }
+          }
           return jsonError({
             task_id,
             status: "prompt_rejected",
@@ -178,6 +228,10 @@ export function registerOpencodeContinueTask(server: McpServer) {
           });
         }
         run.dispatchState = outcome.state;
+        if (outcome.state === "accepted") {
+          const inbox = outcome.response as { id?: unknown } | undefined;
+          if (typeof inbox?.id === "string") run.inboxId = inbox.id;
+        }
         if (outcome.state === "uncertain") run.dispatchError = outcome.error;
         observeRun(task_id, runId);
 
@@ -206,6 +260,7 @@ export function registerOpencodeContinueTask(server: McpServer) {
           workspace: task.workspace,
         });
       } finally {
+        if (provisionalLease) releaseWorkspace(provisionalLease);
         releaseWorkspaceDispatch();
         releaseTaskDispatch(task_id);
       }

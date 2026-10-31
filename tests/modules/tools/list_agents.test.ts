@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
-const createOpencodeClientMock = vi.fn();
+const makeClientMock = vi.fn();
 const getUsageLimitsMock = vi.fn();
 
-vi.mock("@opencode-ai/sdk", () => ({
-  createOpencodeClient: (...args: unknown[]) => createOpencodeClientMock(...args),
+vi.mock("@opencode/client", () => ({
+  OpenCode: { make: (...args: unknown[]) => makeClientMock(...args) },
 }));
 vi.mock("../../../src/modules/shared/usage-limits.js", async (importOriginal) => {
   const actual =
@@ -28,21 +28,71 @@ function mockClient({
   agents?: unknown;
   providers?: unknown;
 } = {}) {
-  createOpencodeClientMock.mockReturnValue({
-    app: {
-      agents:
-        agents instanceof Error
-          ? vi.fn().mockRejectedValue(agents)
-          : vi.fn().mockResolvedValue(agents),
+  const data = (value: unknown) =>
+    typeof value === "object" && value !== null && "data" in value
+      ? (value as { data: unknown }).data
+      : undefined;
+  const providerData = data(providers) as
+    | {
+        providers?: Array<{ id: string; name: string; models: Record<string, unknown> }>;
+        default?: Record<string, string>;
+      }
+    | undefined;
+  const rawAgents = data(agents);
+  const mappedAgents = Array.isArray(rawAgents)
+    ? rawAgents.map((agent) => ({
+        ...agent,
+        id: agent.name,
+        name: agent.name,
+        ...(agent.model
+          ? { model: { providerID: agent.model.providerID, id: agent.model.modelID } }
+          : {}),
+      }))
+    : [];
+  const mappedProviders = (providerData?.providers ?? []).map(({ id, name }) => ({ id, name }));
+  const mappedModels = (providerData?.providers ?? []).flatMap((provider) =>
+    Object.keys(provider.models).map((id) => ({ id, providerID: provider.id })),
+  );
+  const defaultProvider = Object.entries(providerData?.default ?? {})[0];
+  const client = {
+    agent: {
+      list: vi.fn(async () => {
+        if (agents instanceof Error) throw agents;
+        if (typeof agents === "object" && agents !== null && "error" in agents) {
+          const error = (agents as { error: unknown }).error;
+          throw typeof error === "object" && error !== null && "message" in error
+            ? new Error(String(error.message))
+            : error;
+        }
+        return { data: mappedAgents };
+      }),
     },
-    config: { providers: vi.fn().mockResolvedValue(providers) },
-  });
+    provider: {
+      list: vi.fn(async () => {
+        if (typeof providers === "object" && providers !== null && "error" in providers) {
+          const error = (providers as { error: unknown }).error;
+          throw typeof error === "object" && error !== null && "message" in error
+            ? new Error(String(error.message))
+            : error;
+        }
+        return { data: mappedProviders };
+      }),
+    },
+    model: {
+      list: vi.fn().mockResolvedValue({ data: mappedModels }),
+      default: vi.fn().mockResolvedValue({
+        data: defaultProvider ? { providerID: defaultProvider[0], id: defaultProvider[1] } : null,
+      }),
+    },
+  };
+  makeClientMock.mockReturnValue(client);
+  return client;
 }
 
 describe("opencode_list_agents", () => {
   beforeEach(() => {
     killAllServers();
-    createOpencodeClientMock.mockReset();
+    makeClientMock.mockReset();
     getUsageLimitsMock.mockReset();
     getUsageLimitsMock.mockResolvedValue(null);
   });
@@ -78,7 +128,7 @@ describe("opencode_list_agents", () => {
             options: {},
           },
           {
-            name: "legacy-build",
+            name: "build",
             mode: "primary",
             builtIn: true,
             tools: {},
@@ -132,16 +182,30 @@ describe("opencode_list_agents", () => {
               native: [
                 {
                   name: "plan",
+                  display_name: "plan",
                   mode: "primary",
                   description: "Planning agent",
                   model: "anthropic/claude-sonnet-5",
                 },
-                { name: "legacy-build", mode: "primary" },
+                { name: "build", display_name: "build", mode: "primary" },
               ],
               custom: [
-                { name: "reviewer", mode: "subagent" },
-                { name: "no-flags", mode: "subagent" },
+                { name: "reviewer", display_name: "reviewer", mode: "subagent" },
+                { name: "no-flags", display_name: "no-flags", mode: "subagent" },
               ],
+              all: [
+                {
+                  name: "plan",
+                  display_name: "plan",
+                  mode: "primary",
+                  description: "Planning agent",
+                  model: "anthropic/claude-sonnet-5",
+                },
+                { name: "build", display_name: "build", mode: "primary" },
+                { name: "reviewer", display_name: "reviewer", mode: "subagent" },
+                { name: "no-flags", display_name: "no-flags", mode: "subagent" },
+              ],
+              classification: "builtin_ids",
             },
             models: {
               defaults: { anthropic: "claude-sonnet-5" },
@@ -228,7 +292,7 @@ describe("opencode_list_agents", () => {
           text: JSON.stringify({
             server_id: "srv-1",
             directory: process.cwd(),
-            agents: { native: [], custom: [] },
+            agents: { native: [], custom: [], all: [], classification: "builtin_ids" },
             models: { defaults: {}, quota_snapshot: null, providers: [] },
           }),
         },
@@ -248,7 +312,7 @@ describe("opencode_list_agents", () => {
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const result = await fake.getHandler()({ server_id: "srv-1", directory: "." });
-    expect(createOpencodeClientMock).toHaveBeenCalledWith(expect.objectContaining({ directory }));
+    expect(makeClientMock).toHaveBeenCalledOnce();
     expect(JSON.parse(result.content[0].text).directory).toBe(directory);
   });
 
@@ -300,7 +364,7 @@ describe("opencode_list_agents", () => {
     registerOpencodeListAgents(fake.server);
     const result = await fake.getHandler()({ server_id: "srv-1", directory: firstLink });
     expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "error" });
-    expect(createOpencodeClientMock).not.toHaveBeenCalled();
+    expect(makeClientMock).not.toHaveBeenCalled();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -389,12 +453,22 @@ describe("opencode_list_agents", () => {
     });
   });
 
+  it("preserves messages on plain object errors", async () => {
+    registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
+    const client = mockClient();
+    client.agent.list.mockRejectedValue({ message: "plain object failure" });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const result = await fake.getHandler()({ server_id: "srv-1" });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: "error",
+      message: "plain object failure",
+    });
+  });
+
   it("returns an error result when the request throws a non-Error value", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    createOpencodeClientMock.mockReturnValue({
-      app: { agents: vi.fn().mockRejectedValue("weird failure") },
-      config: { providers: vi.fn().mockResolvedValue({ data: { providers: [], default: {} } }) },
-    });
+    mockClient({ agents: { error: "weird failure" } });
     const fake = createFakeMcpServer();
     registerOpencodeListAgents(fake.server);
     const handler = fake.getHandler();

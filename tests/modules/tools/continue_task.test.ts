@@ -17,9 +17,49 @@ import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js"
 
 const clientForTaskMock = vi.fn();
 
-vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
-  clientForTask: (...args: unknown[]) => clientForTaskMock(...args),
-}));
+vi.mock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../src/modules/shared/opencode-client.js")>();
+  return {
+    ...actual,
+    clientForTask: (...args: unknown[]) => {
+      const resolved = clientForTaskMock(...args);
+      if (!resolved) return resolved;
+      const legacy = resolved.client;
+      const session = legacy.session ?? {};
+      return {
+        ...resolved,
+        client: {
+          session: {
+            get: session.get ?? vi.fn().mockResolvedValue({ id: resolved.sessionId }),
+            prompt: (...promptArgs: unknown[]) => session.promptAsync?.(...promptArgs),
+            switchAgent: session.switchAgent ?? vi.fn().mockResolvedValue(undefined),
+            switchModel: session.switchModel ?? vi.fn().mockResolvedValue(undefined),
+          },
+          agent: {
+            list:
+              resolved.client.agent?.list ??
+              vi.fn().mockResolvedValue({
+                data: [
+                  { id: "build", name: "Build", mode: "primary", hidden: false, permissions: [] },
+                ],
+              }),
+          },
+          model: {
+            list:
+              resolved.client.model?.list ??
+              vi.fn().mockResolvedValue({
+                data: [
+                  { providerID: "anthropic", id: "claude-sonnet-4" },
+                  { providerID: "anthropic", id: "claude-opus-4" },
+                ],
+              }),
+          },
+        },
+      };
+    },
+  };
+});
 vi.mock("../../../src/modules/shared/run-observer.js", () => ({ observeRun: vi.fn() }));
 
 const { registerOpencodeContinueTask } = await import(
@@ -99,6 +139,28 @@ describe("opencode_continue_task", () => {
           }),
         },
       ],
+    });
+  });
+
+  it("rejects dispatch to a removed managed workspace", async () => {
+    const task = getTask("task-1");
+    if (!task) throw new Error("task fixture missing");
+    task.workspaceId = "removed-workspace";
+    task.workspace = {
+      workspace_id: "removed-workspace",
+      mode: "worktree",
+      source_directory: "/source",
+      execution_directory: "/removed",
+      managed: true,
+      state: "removed",
+    };
+    clientForTaskMock.mockReturnValue({ client: { session: {} }, sessionId: "session-1" });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    const result = await fake.getHandler()({ task_id: "task-1", prompt: "resume" });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: "workspace_removed",
+      workspace: { state: "removed" },
     });
   });
 
@@ -385,8 +447,19 @@ describe("opencode_continue_task", () => {
 
   it("sends the follow-up prompt to the same session with agent and model", async () => {
     const promptAsync = vi.fn().mockResolvedValue({});
+    const switchModel = vi.fn().mockResolvedValue(undefined);
     clientForTaskMock.mockReturnValue({
-      client: { session: { promptAsync } },
+      client: {
+        session: {
+          promptAsync,
+          get: vi.fn().mockResolvedValue({
+            id: "session-1",
+            agent: "plan",
+            model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+          }),
+          switchModel,
+        },
+      },
       sessionId: "session-1",
     });
     const fake = createFakeMcpServer();
@@ -401,20 +474,181 @@ describe("opencode_continue_task", () => {
     });
 
     expect(promptAsync).toHaveBeenCalledWith({
-      path: { id: "session-1" },
-      body: {
-        messageID: expect.any(String),
-        parts: [{ type: "text", text: "keep going" }],
-        agent: "build",
-        model: { providerID: "anthropic", modelID: "claude-sonnet-4" },
-      },
+      sessionID: "session-1",
+      id: expect.stringMatching(/^msg_/),
+      text: "keep going",
     });
-    expect(promptAsync.mock.calls[0][0].body.messageID).toMatch(/^msg_/);
+    expect(promptAsync.mock.calls[0][0].id).toMatch(/^msg_/);
+    expect(switchModel).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      model: { providerID: "anthropic", id: "claude-sonnet-4" },
+    });
+    expect(getTask("task-1")?.runs?.at(-1)?.restoreSelection).toEqual({
+      agent: "plan",
+      model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+    });
     expect(JSON.parse(result.content[0].text)).toMatchObject({
       task_id: "task-1",
       session_id: "session-1",
       status: "pending",
       run_id: expect.any(String),
+    });
+  });
+
+  it("preserves a configured task model variant when the session response omits its model", async () => {
+    const task = getTask("task-1");
+    if (!task) throw new Error("task fixture missing");
+    task.model = { providerID: "anthropic", id: "claude-sonnet-4", variant: "balanced" };
+    clientForTaskMock.mockReturnValue({
+      client: { session: { promptAsync: vi.fn().mockResolvedValue({}) } },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    await fake.getHandler()({
+      task_id: "task-1",
+      prompt: "temporary override",
+      model: "anthropic/claude-opus-4",
+    });
+    expect(getTask("task-1")?.runs?.at(-1)?.restoreSelection).toEqual({
+      model: { providerID: "anthropic", id: "claude-sonnet-4", variant: "balanced" },
+    });
+  });
+
+  it("restores a pending session selection before continuing", async () => {
+    const task = getTask("task-1");
+    if (!task) throw new Error("task fixture missing");
+    task.pendingSelectionRestore = {
+      agent: "plan",
+      model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+    };
+    const switchAgent = vi.fn().mockResolvedValue(undefined);
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    clientForTaskMock.mockReturnValue({
+      client: { session: { promptAsync: vi.fn().mockResolvedValue({}), switchAgent, switchModel } },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    await fake.getHandler()({ task_id: "task-1", prompt: "resume" });
+    expect(switchAgent).toHaveBeenCalledWith({ sessionID: "session-1", agent: "plan" });
+    expect(switchModel).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+    });
+    expect(getTask("task-1")?.pendingSelectionRestore).toBeUndefined();
+  });
+
+  it("returns available agents and models when requested selections are unknown", async () => {
+    clientForTaskMock.mockReturnValue({
+      client: {
+        session: { promptAsync: vi.fn() },
+        agent: { list: vi.fn().mockResolvedValue({ data: [{ id: "build" }, { id: "plan" }] }) },
+        model: {
+          list: vi.fn().mockResolvedValue({ data: [{ providerID: "local", id: "model" }] }),
+        },
+      },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    const handler = fake.getHandler();
+    const unknownAgent = await handler({ task_id: "task-1", prompt: "x", agent: "unknown" });
+    expect(JSON.parse(unknownAgent.content[0].text)).toMatchObject({
+      status: "unknown_agent",
+      available_agents: ["build", "plan"],
+    });
+    const unknownModel = await handler({ task_id: "task-1", prompt: "x", model: "missing/model" });
+    expect(JSON.parse(unknownModel.content[0].text)).toMatchObject({
+      status: "unknown_model",
+      available_models: ["local/model"],
+    });
+  });
+
+  it("retains the prior selection when a switch and its restoration both fail", async () => {
+    const task = getTask("task-1");
+    if (!task) throw new Error("task fixture missing");
+    task.agent = "plan";
+    const switchAgent = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("selection switch failed"))
+      .mockRejectedValueOnce(new Error("selection restoration failed"));
+    clientForTaskMock.mockReturnValue({
+      client: { session: { promptAsync: vi.fn(), switchAgent } },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    const result = await fake.getHandler()({
+      task_id: "task-1",
+      prompt: "override",
+      agent: "build",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: "error",
+      message: "selection switch failed",
+    });
+    expect(getTask("task-1")?.pendingSelectionRestore).toEqual({ agent: "plan" });
+  });
+
+  it("marks the selection restored after a definitively rejected prompt", async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    clientForTaskMock.mockReturnValue({
+      client: {
+        session: {
+          promptAsync: vi.fn().mockResolvedValue({
+            error: { message: "bad prompt" },
+            response: { status: 400 },
+          }),
+          get: vi.fn().mockResolvedValue({
+            model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+          }),
+          switchModel,
+        },
+      },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    await fake.getHandler()({
+      task_id: "task-1",
+      prompt: "rejected",
+      model: "anthropic/claude-sonnet-4",
+    });
+    expect(getTask("task-1")?.runs).toEqual([]);
+    expect(switchModel).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains selection restoration work when a rejected prompt cannot restore the model", async () => {
+    const switchModel = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("restore model failed"));
+    clientForTaskMock.mockReturnValue({
+      client: {
+        session: {
+          promptAsync: vi.fn().mockResolvedValue({
+            error: { message: "bad prompt" },
+            response: { status: 400 },
+          }),
+          get: vi.fn().mockResolvedValue({
+            model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
+          }),
+          switchModel,
+        },
+      },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    const result = await fake.getHandler()({
+      task_id: "task-1",
+      prompt: "rejected",
+      model: "anthropic/claude-sonnet-4",
+    });
+    expect(JSON.parse(result.content[0].text).status).toBe("prompt_rejected");
+    expect(getTask("task-1")?.pendingSelectionRestore).toEqual({
+      model: { providerID: "anthropic", id: "claude-opus-4", variant: "thinking" },
     });
   });
 
@@ -431,9 +665,21 @@ describe("opencode_continue_task", () => {
     await handler({ task_id: "task-1", prompt: "keep going" });
 
     expect(promptAsync).toHaveBeenCalledWith({
-      path: { id: "session-1" },
-      body: { messageID: expect.any(String), parts: [{ type: "text", text: "keep going" }] },
+      sessionID: "session-1",
+      id: expect.stringMatching(/^msg_/),
+      text: "keep going",
     });
+  });
+
+  it("retains a confirmed inbox id from the continuation acknowledgement", async () => {
+    clientForTaskMock.mockReturnValue({
+      client: { session: { promptAsync: vi.fn().mockResolvedValue({ id: "inbox-1" }) } },
+      sessionId: "session-1",
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeContinueTask(fake.server);
+    await fake.getHandler()({ task_id: "task-1", prompt: "queue a continuation" });
+    expect(getTask("task-1")?.runs?.at(-1)?.inboxId).toBe("inbox-1");
   });
 
   it("tracks an uncertain dispatch when the SDK throws an Error", async () => {

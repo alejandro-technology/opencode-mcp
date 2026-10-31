@@ -7,6 +7,7 @@ const {
   clientForTaskMock,
   deriveTaskStatusMock,
   assistantEntriesMock,
+  restoreSelectionMock,
   hasWorkMock,
 } = vi.hoisted(() => ({
   abortAndDrainMock: vi.fn(),
@@ -15,6 +16,7 @@ const {
   clientForTaskMock: vi.fn(),
   deriveTaskStatusMock: vi.fn(),
   assistantEntriesMock: vi.fn(),
+  restoreSelectionMock: vi.fn(),
   hasWorkMock: vi.fn(),
 }));
 
@@ -33,6 +35,7 @@ vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   CANCELLED_TASK_MESSAGE: "cancelled",
   clientForTask: clientForTaskMock,
   assistantEntries: assistantEntriesMock,
+  restoreSessionSelection: restoreSelectionMock,
   deriveTaskStatus: deriveTaskStatusMock,
   EMPTY_TURN_MESSAGE: "empty",
   hasWork: hasWorkMock,
@@ -89,6 +92,7 @@ beforeEach(() => {
   releaseWorkspaceMock.mockReset();
   clientForTaskMock.mockReset().mockReturnValue({ client: {}, sessionId: "session-1" });
   deriveTaskStatusMock.mockReset().mockResolvedValue({ task_id: "task", status: "completed" });
+  restoreSelectionMock.mockReset().mockResolvedValue(undefined);
   assistantEntriesMock.mockReset().mockResolvedValue([
     {
       info: { id: "assistant-1", parentID: "msg-user" },
@@ -127,11 +131,57 @@ afterEach(() => {
     "dispatch-uncertain-run",
     "shutdown-complete",
     "shutdown-undrained",
+    "restore-selection",
+    "restore-selection-error",
+    "restore-selection-raw-error",
+    "raw-cache-error",
   ])
     removeTask(taskId);
 });
 
 describe("run observer", () => {
+  it("restores temporary selection overrides at terminal state and records failures", async () => {
+    const restored = register("restore-selection", {
+      restoreSelection: { agent: "plan" },
+    });
+    observeRun("restore-selection", "run-restore-selection");
+    await waitForReady("restore-selection");
+    expect(restoreSelectionMock).toHaveBeenCalledWith({}, "session-1", { agent: "plan" });
+    expect(restored.runs?.[0].selectionRestored).toBe(true);
+
+    const failed = register("restore-selection-error", {
+      restoreSelection: { model: { providerID: "anthropic", id: "sonnet" } },
+    });
+    restoreSelectionMock.mockRejectedValueOnce(new Error("restore refused"));
+    observeRun("restore-selection-error", "run-restore-selection-error");
+    await waitForReady("restore-selection-error");
+    expect(failed.pendingSelectionRestore).toEqual({
+      model: { providerID: "anthropic", id: "sonnet" },
+    });
+    expect(failed.runs?.[0].report?.diagnostics).toContain(
+      "follow-up agent/model selection could not be restored: restore refused",
+    );
+
+    const rawFailure = register("restore-selection-raw-error", {
+      restoreSelection: { agent: "build" },
+    });
+    restoreSelectionMock.mockRejectedValueOnce("restore raw failure");
+    observeRun("restore-selection-raw-error", "run-restore-selection-raw-error");
+    await waitForReady("restore-selection-raw-error");
+    expect(rawFailure.runs?.[0].finalizationError).toContain("restore raw failure");
+  });
+
+  it("normalizes non-Error failures while caching the final task output", async () => {
+    const task = register("raw-cache-error");
+    assistantEntriesMock.mockRejectedValueOnce({ message: "raw cache failure" });
+    observeRun("raw-cache-error", "run-raw-cache-error");
+    await waitForReady("raw-cache-error");
+    expect(assistantEntriesMock).toHaveBeenCalledOnce();
+    expect(task.runs?.[0].result?.error).toBe("[object Object]");
+    expect(task.runs?.[0].report?.diagnostics).toContain(
+      "final task output could not be cached from the OpenCode server",
+    );
+  });
   it("captures a run once, caches final text/progress, and releases its lease", async () => {
     const lease = Symbol("lease");
     const task = register("success", {
@@ -572,6 +622,9 @@ describe("run observer", () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(task.runs?.[0].report?.verification.state).toBe("unavailable");
     expect(task.runs?.[0].reportReady).toBe(true);
+    expect(task.runs?.[0].report?.diagnostics).toContain(
+      "lifecycle observation error: poll failed",
+    );
   });
 
   it("stops active monitors for their own server and ignores unrelated servers", async () => {

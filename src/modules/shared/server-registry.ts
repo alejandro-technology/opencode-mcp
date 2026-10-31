@@ -1,6 +1,8 @@
 export interface OpencodeServerInstance {
   serverId: string;
   baseUrl: string;
+  /** Private per-process API credential; never returned from an MCP tool. */
+  password?: string;
   close: () => void;
   /** Canonical directory inherited by the OpenCode server process. */
   directory?: string;

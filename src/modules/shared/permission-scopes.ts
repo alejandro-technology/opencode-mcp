@@ -1,5 +1,4 @@
-import { createOpencodeClient } from "@opencode-ai/sdk";
-import { fetchWithDeadline } from "./opencode-client.js";
+import { clientForServer } from "./opencode-client.js";
 import { type ExternalDirectoryPolicy, startPermissionResponder } from "./permissions.js";
 import { getServer } from "./server-registry.js";
 
@@ -27,18 +26,13 @@ export function registerPermissionSession(
     if (!server) throw new Error(`OpenCode server is not registered: ${serverId}`);
     if (!server.permissionScopesEnabled) return;
     const sessionIDs = new Set<string>();
-    const responder = startPermissionResponder(
-      createOpencodeClient({
-        baseUrl: server.baseUrl,
-        fetch: fetchWithDeadline,
-        directory,
-      }),
-      {
-        policy: policy ?? server.permissionPolicy,
-        allowedSessionIDs: () => sessionIDs,
-        onError: (error) => console.error("OpenCode permission responder error:", error),
-      },
-    );
+    const client = clientForServer(serverId, directory);
+    if (!client) throw new Error(`OpenCode client unavailable for server: ${serverId}`);
+    const responder = startPermissionResponder(client, {
+      policy: policy ?? server.permissionPolicy,
+      allowedSessionIDs: () => sessionIDs,
+      onError: (error) => console.error("OpenCode permission responder error:", error),
+    });
     scope = { sessionIDs, stop: responder.stop };
     scopes.set(key, scope);
   }

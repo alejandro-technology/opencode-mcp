@@ -14,9 +14,14 @@ import {
   deriveTaskStatus,
   EMPTY_TURN_MESSAGE,
   hasWork,
+  restoreSessionSelection,
   sessionParts,
 } from "./opencode-client.js";
 import { allTasks, getTask, tasksForServer } from "./task-registry.js";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function unavailableUsage(diagnostic: string): ExecutionUsageSnapshot {
   return {
@@ -39,6 +44,7 @@ export function observeRun(taskId: string, runId: string): void {
   observers.set(runId, state);
   void (async () => {
     let errors = 0;
+    let lastObservationError: unknown;
     let execution = "pending";
     while (!state.stopped) {
       const current = getTask(taskId);
@@ -48,6 +54,7 @@ export function observeRun(taskId: string, runId: string): void {
       try {
         const client = clientForTask(taskId);
         if (!client) {
+          lastObservationError = new Error("OpenCode client unavailable during status observation");
           errors++;
         } else {
           const status = await deriveTaskStatus(client.client, client.sessionId, taskId, {
@@ -55,11 +62,25 @@ export function observeRun(taskId: string, runId: string): void {
             usageMessageID: run.message_id,
           });
           errors = 0;
+          lastObservationError = undefined;
           execution = status.status;
           run.executionState = execution;
           if (terminal.has(status.status)) {
             if (run.finalizationStarted) break;
             run.finalizationStarted = true;
+            if (run.restoreSelection && !run.selectionRestored) {
+              try {
+                await restoreSessionSelection(
+                  client.client,
+                  client.sessionId,
+                  run.restoreSelection,
+                );
+                run.selectionRestored = true;
+              } catch (error) {
+                current.pendingSelectionRestore = run.restoreSelection;
+                run.finalizationError = `follow-up agent/model selection could not be restored: ${errorMessage(error)}`;
+              }
+            }
             const finalExecution = run.cancelledAt !== undefined ? "cancelled" : status.status;
             run.executionState = finalExecution;
             if (status.usage) {
@@ -111,6 +132,11 @@ export function observeRun(taskId: string, runId: string): void {
                     attribution: "uncertain_shared_workspace",
                   },
                 };
+            if (run.finalizationError) {
+              run.report.diagnostics.push(run.finalizationError);
+              run.report.evidence.complete = false;
+              run.report.evidence.errors.push(run.finalizationError);
+            }
             run.report.verification = {
               ...run.report.verification,
               execution_state: finalExecution,
@@ -141,7 +167,7 @@ export function observeRun(taskId: string, runId: string): void {
             break;
           }
         }
-      } catch {
+      } catch (error) {
         if (run.finalizationStarted) {
           run.finalizationError = "run finalization failed; evidence could not be safely completed";
           run.usage ??= unavailableUsage("usage unavailable: run finalization failed");
@@ -172,24 +198,31 @@ export function observeRun(taskId: string, runId: string): void {
           state.stopped = true;
           break;
         }
+        lastObservationError = error;
         errors++;
       }
       if (errors >= 3) {
         run.usage ??= unavailableUsage(
           "usage unavailable: lifecycle observation failed repeatedly",
         );
+        const observationError = errorMessage(lastObservationError).replace(
+          /Basic\s+[A-Za-z0-9+/=_-]+/gi,
+          "Basic [redacted]",
+        );
+        const observationDiagnostic = `lifecycle observation error: ${observationError}`;
         run.report = {
           changes: [],
           verification: { state: "unavailable", checks: [], execution_state: execution },
           diagnostics: [
             "lifecycle observation failed repeatedly; workspace delta was not captured",
+            observationDiagnostic,
             run.usage.diagnostic ?? "usage unavailable",
           ],
           evidence: {
             source: "workspace_delta",
             inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
             complete: false,
-            errors: ["lifecycle observation failed"],
+            errors: ["lifecycle observation failed", observationDiagnostic],
             attribution: "uncertain_shared_workspace",
           },
         };
@@ -272,14 +305,14 @@ async function cacheFinalResult(
     run.usage ??= run.result.usage as ExecutionUsageSnapshot;
   } catch (cause) {
     run.usage ??= unavailableUsage(
-      `usage unavailable: final task messages could not be fetched (${cause instanceof Error ? cause.message : String(cause)})`,
+      `usage unavailable: final task messages could not be fetched (${errorMessage(cause)})`,
     );
     run.result = {
       task_id: taskId,
       run_id: runId,
       status,
       result: null,
-      error: cause instanceof Error ? cause.message : String(cause),
+      error: errorMessage(cause),
       usage: run.usage,
     };
     // A terminal run always has a report before output caching starts; if that

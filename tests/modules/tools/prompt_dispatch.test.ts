@@ -27,6 +27,7 @@ async function setupHandlers(fetch: typeof globalThis.fetch) {
     serverId: "dispatch-server",
     baseUrl: "http://127.0.0.1:43219",
     directory,
+    password: "test-password",
     close: vi.fn(),
   });
   const startServer = createFakeMcpServer();
@@ -66,13 +67,31 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
     let writerActive = false;
     const fetchMock = vi.fn(async (request: Request) => {
       const pathname = new URL(request.url).pathname;
-      if (pathname === "/session" && request.method === "POST")
-        return response(200, { id: "session-1" });
-      if (pathname.endsWith("/prompt_async")) {
+      if (pathname === "/api/agent")
+        return response(200, {
+          location: { directory },
+          data: [
+            {
+              id: "build",
+              name: "Build",
+              mode: "primary",
+              hidden: false,
+              request: { settings: {}, headers: {}, body: {} },
+              permissions: [],
+            },
+          ],
+        });
+      if (pathname === "/api/config") return response(200, []);
+      if (pathname === "/api/model/default")
+        return response(200, { location: { directory }, data: null });
+      if (pathname === "/api/session" && request.method === "POST")
+        return response(200, { data: { id: "session-1" } });
+      if (pathname.endsWith("/prompt")) {
         writerActive = true;
         throw new TypeError("fetch failed after server acceptance");
       }
-      if (pathname.endsWith("/abort")) return response(200, true);
+      if (pathname.endsWith("/active")) return response(200, { data: {} });
+      if (pathname.endsWith("/interrupt")) return response(200, { interrupted: true });
       return response(404, { message: `unexpected ${pathname}` });
     });
     const { directory, startServer, tasks, execution, servers, cancelServer } =
@@ -89,13 +108,13 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
       status: "dispatch_uncertain",
       task_id: expect.any(String),
       run_id: expect.any(String),
-      dispatch: { state: "uncertain", error: "fetch failed after server acceptance" },
+      dispatch: { state: "uncertain", error: "Transport: fetch failed after server acceptance" },
     });
     const task = tasks.getTask(payload.task_id);
     expect(task?.runs?.[0]).toMatchObject({
       run_id: payload.run_id,
       dispatchState: "uncertain",
-      dispatchError: "fetch failed after server acceptance",
+      dispatchError: "Transport: fetch failed after server acceptance",
     });
     expect(task?.runs?.[0].workspaceLease).toBeDefined();
     expect(await execution.reserveWorkspace(directory, true)).toBeUndefined();
@@ -104,9 +123,7 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
     const ordinaryWriter = await start({ server_id: "dispatch-server", prompt: "ordinary writer" });
     expect(JSON.parse(ordinaryWriter.content[0].text).status).toBe("workspace_busy");
     expect(
-      fetchMock.mock.calls.filter(([request]) =>
-        new URL(request.url).pathname.endsWith("/prompt_async"),
-      ),
+      fetchMock.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith("/prompt")),
     ).toHaveLength(1);
 
     const cancelled = await cancelServer.getHandler()({ task_id: payload.task_id });
@@ -124,15 +141,36 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
     let abortTransportFails = false;
     const fetchMock = vi.fn(async (request: Request) => {
       const pathname = new URL(request.url).pathname;
-      if (pathname === "/session" && request.method === "POST")
-        return response(200, { id: "session-1" });
-      if (pathname.endsWith("/prompt_async"))
-        return promptStatus === 204
-          ? new Response(null, { status: 204 })
-          : response(promptStatus, { message: "rejected" });
-      if (pathname.endsWith("/abort")) {
+      if (pathname === "/api/agent")
+        return response(200, {
+          location: { directory },
+          data: [
+            {
+              id: "build",
+              name: "Build",
+              mode: "primary",
+              hidden: false,
+              request: { settings: {}, headers: {}, body: {} },
+              permissions: [],
+            },
+          ],
+        });
+      if (pathname === "/api/config") return response(200, []);
+      if (pathname === "/api/model/default")
+        return response(200, { location: { directory }, data: null });
+      if (pathname === "/api/session" && request.method === "POST")
+        return response(200, { data: { id: "session-1" } });
+      if (pathname.endsWith("/prompt"))
+        return response(
+          promptStatus,
+          promptStatus >= 400
+            ? { _tag: "InvalidRequestError", message: "rejected" }
+            : { data: { id: "inbox-1" } },
+        );
+      if (pathname.endsWith("/active")) return response(200, { data: {} });
+      if (pathname.endsWith("/interrupt")) {
         if (abortTransportFails) throw new TypeError("abort ACK lost");
-        return response(200, true);
+        return response(200, { interrupted: true });
       }
       return response(404, { message: `unexpected ${pathname}` });
     });
@@ -179,13 +217,19 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
     let abortFails = false;
     const fetchMock = vi.fn(async (request: Request) => {
       const pathname = new URL(request.url).pathname;
-      if (pathname.endsWith("/prompt_async")) {
-        if (promptMode === "reject") return response(409, { message: "session busy" });
+      if (pathname === "/api/session/session-1")
+        return response(200, {
+          data: { id: "session-1", agent: "build", time: { created: 1, updated: 1 } },
+        });
+      if (pathname.endsWith("/prompt")) {
+        if (promptMode === "reject")
+          return response(409, { _tag: "ConflictError", message: "session busy" });
         throw new TypeError("continuation ACK lost after acceptance");
       }
-      if (pathname.endsWith("/abort")) {
+      if (pathname.endsWith("/active")) return response(200, { data: {} });
+      if (pathname.endsWith("/interrupt")) {
         if (abortFails) throw new TypeError("abort ACK lost");
-        return response(200, true);
+        return response(200, { interrupted: true });
       }
       return response(404, { message: `unexpected ${pathname}` });
     });
@@ -258,7 +302,7 @@ describe("prompt dispatch acknowledgement resolution over the real SDK", () => {
     );
     expect(uncertain).toMatchObject({
       status: "dispatch_uncertain",
-      dispatch: { state: "uncertain", error: "continuation ACK lost after acceptance" },
+      dispatch: { state: "uncertain", error: "Transport: continuation ACK lost after acceptance" },
     });
     const current = tasks.getTask("history-task");
     expect(current?.currentRunId).toBe(uncertain.run_id);

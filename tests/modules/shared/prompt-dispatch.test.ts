@@ -39,6 +39,24 @@ describe("sendPromptAndClassify", () => {
     ).resolves.toEqual({ state: "uncertain", error: "non-numeric status" });
   });
 
+  it("classifies thrown SDK errors using response and cause status evidence", async () => {
+    await expect(
+      sendPromptAndClassify(async () => {
+        throw Object.assign(new Error("invalid continuation"), { cause: { status: 409 } });
+      }),
+    ).resolves.toEqual({ state: "rejected", status: 409, error: "invalid continuation" });
+    await expect(
+      sendPromptAndClassify(async () => {
+        throw Object.assign(new Error("upstream unavailable"), { response: { status: 503 } });
+      }),
+    ).resolves.toEqual({ state: "uncertain", status: 503, error: "upstream unavailable" });
+    await expect(
+      sendPromptAndClassify(async () => {
+        throw Object.assign(new Error("invalid cause status"), { cause: { status: "409" } });
+      }),
+    ).resolves.toEqual({ state: "uncertain", error: "invalid cause status" });
+  });
+
   it("retains ambiguity for transport throws, including non-Error values", async () => {
     await expect(
       sendPromptAndClassify(async () => {

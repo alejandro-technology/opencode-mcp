@@ -14,6 +14,63 @@ const { registerServer, killAllServers } = await import(
   "../../../src/modules/shared/server-registry.js"
 );
 
+type FixtureRecord = Record<string, unknown>;
+
+function fixtureRecord(value: unknown): FixtureRecord {
+  return typeof value === "object" && value !== null ? (value as FixtureRecord) : {};
+}
+
+function v2Client(legacy: FixtureRecord) {
+  const agent = fixtureRecord(legacy.agent);
+  const agentList =
+    agent.list ??
+    vi.fn().mockResolvedValue({
+      data: [{ id: "build", name: "Build", mode: "primary", hidden: false, permissions: [] }],
+    });
+  const config = fixtureRecord(legacy.config);
+  const providerCatalog = config.providers as (() => Promise<unknown>) | undefined;
+  const configGet = config.get as (() => Promise<unknown>) | undefined;
+  const model = fixtureRecord(legacy.model);
+  const modelList = model.list as ((...args: unknown[]) => Promise<unknown>) | undefined;
+  const modelDefault = model.default as ((...args: unknown[]) => Promise<unknown>) | undefined;
+  const session = fixtureRecord(legacy.session);
+  const createSession = session.create as ((...args: unknown[]) => Promise<unknown>) | undefined;
+  const prompt = session.promptAsync as ((...args: unknown[]) => unknown) | undefined;
+  return {
+    agent: { list: agentList },
+    provider: { list: vi.fn().mockResolvedValue({ data: [] }) },
+    model: {
+      list:
+        modelList ??
+        vi.fn(async () => {
+          const result = fixtureRecord(await providerCatalog?.());
+          if (result.error) throw result.error;
+          const data = fixtureRecord(result.data);
+          const providers = Array.isArray(data.providers) ? data.providers : [];
+          return {
+            data: providers.flatMap((providerValue) => {
+              const provider = fixtureRecord(providerValue);
+              const models = fixtureRecord(provider.models);
+              return Object.keys(models).map((id) => ({ id, providerID: provider.id }));
+            }),
+          };
+        }),
+      default: modelDefault ?? vi.fn().mockResolvedValue({ data: null }),
+    },
+    config: { get: configGet ?? vi.fn().mockResolvedValue([]) },
+    session: {
+      create: vi.fn(async (...args: unknown[]) => {
+        const result = fixtureRecord(await createSession?.(...args));
+        return result.data ?? result;
+      }),
+      prompt: vi.fn((...args: unknown[]) => Promise.resolve(prompt?.(...args))),
+      get: vi.fn().mockResolvedValue({ id: "session-1", agent: "build" }),
+      switchAgent: vi.fn().mockResolvedValue(undefined),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+}
+
 describe("opencode_start_task", () => {
   beforeEach(() => {
     killAllServers();
@@ -152,7 +209,7 @@ describe("opencode_start_task", () => {
       workspace_id: workspace.workspace_id,
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
 
     vi.doMock(managerPath, () => ({
@@ -161,10 +218,12 @@ describe("opencode_start_task", () => {
       registerManagedWorkspaceSession: () => false,
       sharedWorkspaceMetadata: () => workspace,
     }));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: { create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }) },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: { create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }) },
+        }),
     }));
     vi.resetModules();
     const retry = await import("../../../src/modules/tools/start_task.js");
@@ -187,7 +246,7 @@ describe("opencode_start_task", () => {
       workspace_id: workspace.workspace_id,
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
 
     vi.doMock(managerPath, () => ({
@@ -200,7 +259,8 @@ describe("opencode_start_task", () => {
         managed: false,
       }),
     }));
-    vi.doMock("../../../src/modules/shared/opencode-client.js", () => ({
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
       clientForServer: () => undefined,
       sdkResponseError: () => undefined,
     }));
@@ -237,10 +297,12 @@ describe("opencode_start_task", () => {
       createManagedWorkspace: vi.fn().mockResolvedValue(workspace),
       acquireManagedWorkspaceDispatch: () => () => {},
     }));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: { create: vi.fn().mockRejectedValue(new Error("worktree backend failed")) },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: { create: vi.fn().mockRejectedValue(new Error("worktree backend failed")) },
+        }),
     }));
     vi.resetModules();
     mod = await import("../../../src/modules/tools/start_task.js");
@@ -264,7 +326,7 @@ describe("opencode_start_task", () => {
       workspace_id: workspace.workspace_id,
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
@@ -286,13 +348,15 @@ describe("opencode_start_task", () => {
       registerManagedWorkspaceSession: () => true,
       associateManagedWorkspaceTask: vi.fn(),
     }));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-rejected" } }),
-          promptAsync: vi.fn(),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-rejected" } }),
+            promptAsync: vi.fn(),
+          },
+        }),
     }));
     vi.doMock("../../../src/modules/shared/prompt-dispatch.js", () => ({
       sendPromptAndClassify: vi
@@ -329,20 +393,22 @@ describe("opencode_start_task", () => {
       executionState: "failed",
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.doUnmock("../../../src/modules/shared/prompt-dispatch.js");
     vi.doUnmock("../../../src/modules/shared/run-observer.js");
     vi.resetModules();
   });
 
   it("removes shared tasks after definite prompt rejection", async () => {
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "shared-rejected-session" } }),
-          promptAsync: vi.fn(),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "shared-rejected-session" } }),
+            promptAsync: vi.fn(),
+          },
+        }),
     }));
     vi.doMock("../../../src/modules/shared/prompt-dispatch.js", () => ({
       sendPromptAndClassify: vi
@@ -370,7 +436,7 @@ describe("opencode_start_task", () => {
     expect(payload).toMatchObject({ status: "prompt_rejected", message: "no" });
     expect(payload.workspace.mode).toBe("shared");
     expect(tasks.getTask(payload.task_id)).toBeUndefined();
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.doUnmock("../../../src/modules/shared/prompt-dispatch.js");
     vi.doUnmock("../../../src/modules/shared/run-observer.js");
     vi.resetModules();
@@ -395,11 +461,13 @@ describe("opencode_start_task", () => {
     });
 
     vi.doMock(managerPath, managerMock);
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        config: { providers: vi.fn().mockResolvedValue({ data: { providers: [] } }) },
-        session: { create: vi.fn() },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          config: { providers: vi.fn().mockResolvedValue({ data: { providers: [] } }) },
+          session: { create: vi.fn() },
+        }),
     }));
     vi.resetModules();
     let mod = await import("../../../src/modules/tools/start_task.js");
@@ -423,12 +491,13 @@ describe("opencode_start_task", () => {
       workspace_id: workspace.workspace_id,
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
 
     vi.doMock(managerPath, managerMock);
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({ session: { create: vi.fn().mockResolvedValue({}) } }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () => v2Client({ session: { create: vi.fn().mockResolvedValue({}) } }),
     }));
     vi.resetModules();
     mod = await import("../../../src/modules/tools/start_task.js");
@@ -452,20 +521,22 @@ describe("opencode_start_task", () => {
       workspace: { managed: true },
     });
     vi.doUnmock(managerPath);
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("returns unknown_model when the provider is not on the server", async () => {
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: { create: vi.fn(), promptAsync: vi.fn() },
-        config: {
-          providers: vi.fn().mockResolvedValue({
-            data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
-          }),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: { create: vi.fn(), promptAsync: vi.fn() },
+          config: {
+            providers: vi.fn().mockResolvedValue({
+              data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
+            }),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -496,26 +567,28 @@ describe("opencode_start_task", () => {
             status: "unknown_model",
             model: "opencode/minimax-m3",
             message:
-              "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents (or from available_models below) instead of guessing",
+              "model is not available on this server; copy an exact 'providerID/modelID' from opencode_list_agents instead of guessing",
             available_models: ["opencode-go/minimax-m3"],
           }),
         },
       ],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("returns unknown_model when the model is missing from a known provider", async () => {
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: { create: vi.fn(), promptAsync: vi.fn() },
-        config: {
-          providers: vi.fn().mockResolvedValue({
-            data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
-          }),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: { create: vi.fn(), promptAsync: vi.fn() },
+          config: {
+            providers: vi.fn().mockResolvedValue({
+              data: { providers: [{ id: "opencode-go", models: { "minimax-m3": {} } }] },
+            }),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -537,21 +610,23 @@ describe("opencode_start_task", () => {
       status: "unknown_model",
       model: "opencode-go/nope",
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("skips model validation when the provider catalog is unavailable", async () => {
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync: vi.fn().mockResolvedValue({}),
-        },
-        config: {
-          providers: vi.fn().mockResolvedValue({ error: { message: "boom" } }),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync: vi.fn().mockResolvedValue({}),
+          },
+          config: {
+            providers: vi.fn().mockResolvedValue({ error: { message: "boom" } }),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -571,19 +646,21 @@ describe("opencode_start_task", () => {
     expect(result).toMatchObject({
       content: [{ type: "text", text: expect.stringContaining('"status":"pending"') }],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("returns an error when session creation fails to yield an id", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({}),
-          promptAsync: vi.fn(),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({}),
+            promptAsync: vi.fn(),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -613,7 +690,7 @@ describe("opencode_start_task", () => {
         },
       ],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
@@ -623,8 +700,9 @@ describe("opencode_start_task", () => {
       .mockResolvedValueOnce({ error: { message: "HTTP create failed" } })
       .mockResolvedValueOnce({ data: { id: "session-1" } });
     const promptAsync = vi.fn().mockResolvedValue({ error: { message: "HTTP dispatch failed" } });
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({ session: { create, promptAsync } }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () => v2Client({ session: { create, promptAsync } }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -646,26 +724,28 @@ describe("opencode_start_task", () => {
       dispatch: { state: "uncertain", error: "HTTP dispatch failed" },
     });
     expect(promptAsync).toHaveBeenCalledOnce();
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("creates a session, starts the prompt, and registers a task", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync: vi.fn().mockResolvedValue({}),
-        },
-        config: {
-          providers: vi.fn().mockResolvedValue({
-            data: {
-              providers: [{ id: "anthropic", models: { "claude-sonnet-4": {} } }],
-            },
-          }),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync: vi.fn().mockResolvedValue({}),
+          },
+          config: {
+            providers: vi.fn().mockResolvedValue({
+              data: {
+                providers: [{ id: "anthropic", models: { "claude-sonnet-4": {} } }],
+              },
+            }),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -723,20 +803,22 @@ describe("opencode_start_task", () => {
         },
       ],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("creates a session without optional agent or model fields", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
     const promptAsync = vi.fn().mockResolvedValue({});
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync,
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync,
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -754,23 +836,26 @@ describe("opencode_start_task", () => {
     await handler({ server_id: "srv-1", prompt: "do the thing" });
 
     expect(promptAsync).toHaveBeenCalledWith({
-      path: { id: "session-1" },
-      body: { messageID: "msg_generated-task-id", parts: [{ type: "text", text: "do the thing" }] },
+      sessionID: "session-1",
+      id: "msg_generated-task-id",
+      text: "do the thing",
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("captures caller criteria and retains a start-time inventory failure", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "start-report-baseline-"));
     await writeFile(path.join(directory, "oversized.bin"), Buffer.alloc(32 * 1024 * 1024 + 1));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync: vi.fn().mockResolvedValue({}),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync: vi.fn().mockResolvedValue({}),
+          },
+        }),
     }));
     vi.doMock("../../../src/modules/shared/run-observer.js", () => ({ observeRun: vi.fn() }));
     vi.resetModules();
@@ -802,20 +887,22 @@ describe("opencode_start_task", () => {
     tasks.removeTask("generated-task-id");
     registry.killAllServers();
     await rm(directory, { recursive: true, force: true });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.doUnmock("../../../src/modules/shared/run-observer.js");
     vi.resetModules();
   });
 
   it("returns workspace_busy when another verified MCP task owns an overlapping workspace", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "start-workspace-busy-"));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync: vi.fn().mockResolvedValue({}),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync: vi.fn().mockResolvedValue({}),
+          },
+        }),
     }));
     vi.resetModules();
     const executionReport = await import("../../../src/modules/shared/execution-report.js");
@@ -841,20 +928,22 @@ describe("opencode_start_task", () => {
     executionReport.releaseWorkspace(blockingLease);
     registry.killAllServers();
     await rm(directory, { recursive: true, force: true });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("normalizes non-Error baseline failures and retains leases after an ambiguous dispatch", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "start-baseline-raw-"));
     const promptAsync = vi.fn().mockRejectedValue("dispatch string failure");
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync,
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync,
+          },
+        }),
     }));
     vi.doMock("../../../src/modules/shared/run-observer.js", () => ({ observeRun: vi.fn() }));
     vi.doMock("../../../src/modules/shared/execution-report.js", async (importOriginal) => ({
@@ -895,7 +984,7 @@ describe("opencode_start_task", () => {
     executionReport.releaseWorkspace(nextLease);
     registry.killAllServers();
     await rm(directory, { recursive: true, force: true });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.doUnmock("../../../src/modules/shared/run-observer.js");
     vi.doUnmock("../../../src/modules/shared/execution-report.js");
     vi.resetModules();
@@ -908,13 +997,15 @@ describe("opencode_start_task", () => {
         throw new Error("uuid unavailable");
       },
     }));
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
-          promptAsync: vi.fn().mockResolvedValue({}),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockResolvedValue({ data: { id: "session-1" } }),
+            promptAsync: vi.fn().mockResolvedValue({}),
+          },
+        }),
     }));
     vi.doMock("../../../src/modules/shared/run-observer.js", () => ({ observeRun: vi.fn() }));
     vi.resetModules();
@@ -941,20 +1032,22 @@ describe("opencode_start_task", () => {
     registry.killAllServers();
     await rm(directory, { recursive: true, force: true });
     vi.doUnmock("node:crypto");
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.doUnmock("../../../src/modules/shared/run-observer.js");
     vi.resetModules();
   });
 
   it("returns an error result when the SDK throws an Error", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockRejectedValue(new Error("db down")),
-          promptAsync: vi.fn(),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockRejectedValue(new Error("db down")),
+            promptAsync: vi.fn(),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -980,19 +1073,21 @@ describe("opencode_start_task", () => {
         },
       ],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
   });
 
   it("returns an error result when the SDK throws a non-Error value", async () => {
     registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: () => ({
-        session: {
-          create: vi.fn().mockRejectedValue("weird"),
-          promptAsync: vi.fn(),
-        },
-      }),
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () =>
+        v2Client({
+          session: {
+            create: vi.fn().mockRejectedValue("weird"),
+            promptAsync: vi.fn(),
+          },
+        }),
     }));
     vi.resetModules();
     const mod = await import("../../../src/modules/tools/start_task.js");
@@ -1018,8 +1113,179 @@ describe("opencode_start_task", () => {
         },
       ],
     });
-    vi.doUnmock("@opencode-ai/sdk");
+    vi.doUnmock("../../../src/modules/shared/opencode-client.js");
     vi.resetModules();
+  });
+
+  it("selects the configured document agent from CLI2 config entries", async () => {
+    const create = vi.fn().mockResolvedValue({ id: "session-1" });
+    const configGet = vi.fn().mockResolvedValue([
+      { type: "document", info: { default_agent: "configured" } },
+      { type: "document", info: { default_agent: "" } },
+      { type: "user", info: { default_agent: "ignored" } },
+    ]);
+    const client = v2Client({
+      agent: { list: vi.fn().mockResolvedValue({ data: [{ id: "configured" }] }) },
+      config: { get: configGet },
+      session: { create, promptAsync: vi.fn().mockResolvedValue({}) },
+    });
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () => client,
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "start-configured-agent-"));
+    registry.registerServer({
+      serverId: "configured-agent-server",
+      baseUrl: "http://localhost",
+      directory,
+      close: vi.fn(),
+    });
+    try {
+      const fake = createFakeMcpServer();
+      mod.registerOpencodeStartTask(fake.server);
+      const result = await fake.getHandler()({
+        server_id: "configured-agent-server",
+        prompt: "use configured default",
+      });
+      expect(JSON.parse(result.content[0].text).status).toBe("pending");
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ agent: "configured" }));
+      configGet.mockResolvedValue([{ type: "document", info: { default_agent: "missing" } }]);
+      const unavailable = await fake.getHandler()({
+        server_id: "configured-agent-server",
+        prompt: "missing configured default",
+      });
+      expect(JSON.parse(unavailable.content[0].text)).toMatchObject({
+        status: "default_agent_unavailable",
+        available_agents: ["configured"],
+      });
+      const unknownAgent = await fake.getHandler()({
+        server_id: "configured-agent-server",
+        prompt: "unknown requested agent",
+        agent: "not-configured",
+      });
+      expect(JSON.parse(unknownAgent.content[0].text).status).toBe("unknown_agent");
+    } finally {
+      registry.killAllServers();
+      await rm(directory, { recursive: true, force: true });
+      vi.doUnmock("../../../src/modules/shared/opencode-client.js");
+      vi.resetModules();
+    }
+  });
+
+  it("uses a primary agent fallback and reports unavailable defaults", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "start-primary-agent-"));
+    const create = vi.fn().mockResolvedValue({
+      id: "session-1",
+      model: { providerID: "server", id: "session-model" },
+    });
+    const client = v2Client({
+      agent: { list: vi.fn().mockResolvedValue({ data: [{ id: "planner", mode: "primary" }] }) },
+      session: { create, promptAsync: vi.fn().mockResolvedValue({}) },
+    });
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () => client,
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    registry.registerServer({
+      serverId: "primary-agent-server",
+      baseUrl: "http://localhost",
+      directory,
+      close: vi.fn(),
+    });
+    try {
+      const fake = createFakeMcpServer();
+      mod.registerOpencodeStartTask(fake.server);
+      const result = await fake.getHandler()({
+        server_id: "primary-agent-server",
+        prompt: "use primary fallback",
+      });
+      expect(JSON.parse(result.content[0].text).status).toBe("pending");
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ agent: "planner" }));
+      const taskRegistry = await import("../../../src/modules/shared/task-registry.js");
+      const taskId = JSON.parse(result.content[0].text).task_id;
+      expect(taskRegistry.getTask(taskId)?.model).toEqual({
+        providerID: "server",
+        id: "session-model",
+      });
+      const unavailable = await fake.getHandler()({
+        server_id: "primary-agent-server",
+        prompt: "missing default",
+        agent: "missing",
+      });
+      expect(JSON.parse(unavailable.content[0].text)).toMatchObject({
+        status: "unknown_agent",
+        available_agents: ["planner"],
+      });
+    } finally {
+      registry.killAllServers();
+      await rm(directory, { recursive: true, force: true });
+      vi.doUnmock("../../../src/modules/shared/opencode-client.js");
+      vi.resetModules();
+    }
+  });
+
+  it("handles an empty model catalog and a session without a selected agent", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "start-empty-catalog-"));
+    const create = vi.fn().mockResolvedValue({ id: "session-1" });
+    const defaultModel = { providerID: "fixture", id: "default-model" };
+    const client = v2Client({
+      agent: { list: vi.fn().mockResolvedValue({ data: [] }) },
+      model: {
+        list: vi.fn().mockResolvedValue({}),
+        default: vi.fn().mockResolvedValue({ data: defaultModel }),
+      },
+      session: { create, promptAsync: vi.fn().mockResolvedValue({}) },
+    });
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer: () => client,
+    }));
+    vi.resetModules();
+    const mod = await import("../../../src/modules/tools/start_task.js");
+    const registry = await import("../../../src/modules/shared/server-registry.js");
+    registry.killAllServers();
+    registry.registerServer({
+      serverId: "empty-catalog-server",
+      baseUrl: "http://localhost",
+      directory,
+      close: vi.fn(),
+    });
+    try {
+      const fake = createFakeMcpServer();
+      mod.registerOpencodeStartTask(fake.server);
+      const unknownModel = await fake.getHandler()({
+        server_id: "empty-catalog-server",
+        prompt: "model unavailable",
+        model: "missing/model",
+      });
+      expect(JSON.parse(unknownModel.content[0].text)).toMatchObject({
+        status: "unknown_model",
+        available_models: [],
+      });
+      const result = await fake.getHandler()({
+        server_id: "empty-catalog-server",
+        prompt: "no agent selected",
+      });
+      expect(JSON.parse(result.content[0].text).status).toBe("pending");
+      expect(create.mock.calls.at(-1)?.[0]).not.toHaveProperty("agent");
+      const taskRegistry = await import("../../../src/modules/shared/task-registry.js");
+      const task = taskRegistry.getTask(JSON.parse(result.content[0].text).task_id);
+      expect(task?.model).toEqual(defaultModel);
+      taskRegistry.removeTask(task?.taskId ?? "");
+    } finally {
+      registry.killAllServers();
+      await rm(directory, { recursive: true, force: true });
+      vi.doUnmock("../../../src/modules/shared/opencode-client.js");
+      vi.resetModules();
+    }
   });
 
   it("starts a task in a detached committed worktree and leaves the dirty source untouched", async () => {
@@ -1049,23 +1315,41 @@ describe("opencode_start_task", () => {
     process.env.OPENCODE_MCP_WORKSPACE_DIR = cache;
     let generated = 0;
     vi.doMock("node:crypto", () => ({ randomUUID: () => `worktree-id-${++generated}` }));
-    const promptAsync = vi.fn().mockResolvedValue({});
-    const scopedClientOptions: unknown[] = [];
-    vi.doMock("@opencode-ai/sdk", () => ({
-      createOpencodeClient: (options: unknown) => {
-        scopedClientOptions.push(options);
-        return {
-          session: {
-            create: vi.fn().mockResolvedValue({ data: { id: "worktree-session" } }),
-            promptAsync,
-          },
-          config: {
-            providers: vi.fn().mockResolvedValue({
-              data: { providers: [{ id: "fixture", models: { model: {} } }] },
-            }),
-          },
-        };
+    const prompt = vi.fn().mockResolvedValue({ id: "inbox-worktree" });
+    const modelList = vi.fn().mockResolvedValue({
+      data: [{ providerID: "fixture", id: "model" }],
+    });
+    const createSession = vi.fn().mockResolvedValue({ id: "worktree-session" });
+    const scopedClient = {
+      agent: {
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              id: "build",
+              name: "Build",
+              mode: "primary",
+              hidden: false,
+              permissions: [],
+              model: { providerID: "fixture", id: "model", variant: "high-throughput" },
+            },
+          ],
+        }),
       },
+      model: { list: modelList, default: vi.fn().mockResolvedValue({ data: null }) },
+      config: { get: vi.fn().mockResolvedValue([]) },
+      session: {
+        create: createSession,
+        prompt,
+        get: vi.fn().mockResolvedValue({ id: "worktree-session", agent: "build" }),
+        switchAgent: vi.fn().mockResolvedValue(undefined),
+        switchModel: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const clientForServer = vi.fn(() => scopedClient);
+    vi.doMock("../../../src/modules/shared/opencode-client.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      clientForServer,
+      clientForTask: vi.fn(() => ({ client: scopedClient, sessionId: "worktree-session" })),
     }));
     vi.doMock("../../../src/modules/shared/run-observer.js", () => ({ observeRun: vi.fn() }));
     vi.resetModules();
@@ -1089,7 +1373,6 @@ describe("opencode_start_task", () => {
         directory: "project/packages/app",
         workspace_mode: "worktree",
         prompt: "perform isolated work",
-        model: "fixture/model",
       });
       const data = JSON.parse(started.content[0].text);
       expect(data.workspace).toMatchObject({
@@ -1100,18 +1383,28 @@ describe("opencode_start_task", () => {
         source_dirty: true,
       });
       expect(data.workspace.execution_directory).toContain("packages/app");
-      expect(scopedClientOptions[0]).toMatchObject({
-        directory: data.workspace.execution_directory,
-      });
+      expect(clientForServer).toHaveBeenCalledWith(
+        "worktree-server",
+        data.workspace.execution_directory,
+      );
+      expect(modelList).not.toHaveBeenCalled();
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ location: { directory: data.workspace.execution_directory } }),
+      );
       expect(await readFile(path.join(source, "shared.txt"), "utf8")).toBe("source dirty\n");
       expect(await readFile(path.join(source, "untracked.txt"), "utf8")).toBe("source untracked\n");
       expect(
         await readFile(path.join(data.workspace.execution_directory, "shared.txt"), "utf8"),
       ).toBe("committed\n");
-      expect(promptAsync).toHaveBeenCalledOnce();
+      expect(prompt).toHaveBeenCalledOnce();
 
       const task = tasks.getTask(data.task_id);
       if (!task) throw new Error("managed worktree task was not registered");
+      expect(task.model).toEqual({
+        providerID: "fixture",
+        id: "model",
+        variant: "high-throughput",
+      });
       const firstRun = task.runs?.[0];
       if (!firstRun) throw new Error("initial managed task run was not registered");
       if (firstRun.workspaceLease) reports.releaseWorkspace(firstRun.workspaceLease);
@@ -1140,7 +1433,8 @@ describe("opencode_start_task", () => {
       const continued = JSON.parse(continuation.content[0].text);
       expect(continued.workspace).toEqual(data.workspace);
       const secondRun = task.runs?.[1];
-      if (!secondRun) throw new Error("continuation run was not registered");
+      if (!secondRun)
+        throw new Error(`continuation run was not registered: ${JSON.stringify(continued)}`);
       if (secondRun.workspaceLease) reports.releaseWorkspace(secondRun.workspaceLease);
       secondRun.workspaceLease = undefined;
       secondRun.reportReady = true;
@@ -1186,7 +1480,7 @@ describe("opencode_start_task", () => {
       await rm(root, { recursive: true, force: true });
       if (previousCache === undefined) delete process.env.OPENCODE_MCP_WORKSPACE_DIR;
       else process.env.OPENCODE_MCP_WORKSPACE_DIR = previousCache;
-      vi.doUnmock("@opencode-ai/sdk");
+      vi.doUnmock("../../../src/modules/shared/opencode-client.js");
       vi.doUnmock("node:crypto");
       vi.doUnmock("../../../src/modules/shared/run-observer.js");
       vi.resetModules();

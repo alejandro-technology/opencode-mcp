@@ -30,6 +30,9 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Typecheck smoke harness
+        run: pnpm check:smoke
+
       - name: Test with coverage (100% thresholds)
         run: pnpm test:coverage
 
