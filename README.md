@@ -4,7 +4,15 @@
 [![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/alejandro-technology/opencode-mcp/blob/main/vitest.config.ts)
 [![npm](https://img.shields.io/npm/v/mcp-server-opencode)](https://www.npmjs.com/package/mcp-server-opencode)
 
-An MCP (Model Context Protocol) server that lets any MCP host — Claude Code, Codex, Cursor, etc. — drive an [OpenCode](https://opencode.ai) instance and delegate work to its subagents — so orchestrator models like Opus or Fable can hand off tasks to the other models OpenCode exposes.
+**Keep your lead agent lean and save tokens by delegating heavy tasks to background subagents.**
+
+`opencode-mcp` is a Model Context Protocol (MCP) server that connects orchestrator hosts (Claude Code, Codex, Cursor, Antigravity, Pi) with [OpenCode](https://opencode.ai) subagents. Instead of polluting your orchestrator's context window with large file reads, extensive search outputs, and repetitive test runs, you delegate those tasks to isolated subagents and receive only concise, structured results.
+
+### Why this matters (Context Window Economics)
+
+- 🧠 **Prevent Context Rot & Bloat**: Monolithic agents suffer reasoning degradation as the context fills up. Keeping your lead agent as an orchestrator preserves high reasoning quality.
+- 💰 **Slash Token Costs**: Running large exploratory reads or test-fix loops directly inside your primary (Fable/Opus, Astra/Sol) session repeatedly bills for thousands of cached tokens on every follow-up turn. Subagents run in isolated sessions using optimal models.
+- ⚡ **Asynchronous Parallel Execution**: Dispatch multiple investigation or implementation tasks in parallel without blocking the orchestrator.
 
 ## Quick install
 
@@ -66,7 +74,7 @@ Task history and workspace ownership are held in memory for the lifetime of the 
 - **Node.js 18+**
 - **[OpenCode 1.x](https://opencode.ai)** installed and configured (`opencode` must be on your `PATH`, with at least one provider/model set up) — this server spawns and drives OpenCode instances.
 
-The current adapter uses the OpenCode v1 SDK/API and was validated against OpenCode `1.18.34`. OpenCode 2.x is not yet supported.
+The current adapter uses the OpenCode v1 SDK/API and was validated against OpenCode `1.18.34` , `1.19.5`. OpenCode 2.x is not yet supported.
 
 ### Option 1 — npm (recommended)
 
