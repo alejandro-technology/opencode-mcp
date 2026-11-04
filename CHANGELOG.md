@@ -16,6 +16,7 @@ Releases before `1.2.0` predate this file and are not documented here.
 - Declare the existing Node.js 18+ runtime requirement in package metadata. Document Node.js 22.18+ for development and native TypeScript smoke tests; CI now checks the development suite on Node.js 22 and 24.
 - Shorten the README's "How it works" section while retaining execution reports, managed worktrees, and usage reporting. Document process-local state, permission policies, and the trust boundary.
 - Clarify that the adapter targets OpenCode 1.x; OpenCode 2.x compatibility is not yet supported.
+- Sort the models in each `opencode_list_agents` provider entry by descending 5h request estimate so the cheapest-to-run listings are surfaced first. Free/preview model ids absent from the OpenCode Go quota table now report a `"free"` tier with `per_5h: 3000` instead of a null quota and an `unlisted` tier, and Quota rows whose request cells read `Unlimited`/`Ilimitado` parse to unlimited estimates instead of empty. Slug indexing also matches model ids containing dots (dot normalized to hyphen).
 
 ### Fixed
 

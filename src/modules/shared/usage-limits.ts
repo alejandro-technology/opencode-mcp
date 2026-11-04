@@ -12,7 +12,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 const CACHE_FILE_NAME = "usage-limits.json";
 
 /** Requests per 5h above which a model is treated as effectively cheap. */
-const HIGH_VOLUME_MIN = 3_000;
+export const HIGH_VOLUME_MIN = 3_000;
 /** Requests per 5h below which a model is treated as scarce. */
 const BALANCED_MIN = 500;
 
@@ -24,7 +24,7 @@ const SECTION_HEADING = /^(l[ií]mites de uso|usage limits)$/i;
 const HEADER_SCAN_WINDOW = 8;
 
 const COUNT_PATTERN = /^\d{1,3}(?:,\d{3})*$|^\d+$/;
-const EMPTY_CELL_PATTERN = /^[-–—]$/;
+const EMPTY_CELL_PATTERN = /^(?:[-–—]|unlimited|ilimitad[oa]s?)$/i;
 const SPEND_PATTERN = /\$\s?\d+(?:[.,]\d+)?/g;
 
 export type ModelQuota = {
@@ -266,24 +266,24 @@ function writeCache(limits: UsageLimits): void {
 }
 
 /** How costly one request is against the shared budget, cheapest tier first. */
-export type QuotaTier = "high-volume" | "balanced" | "scarce" | "unlisted";
+export type QuotaTier = "high-volume" | "free" | "balanced" | "scarce";
 
-const TIER_ORDER: readonly QuotaTier[] = ["high-volume", "balanced", "scarce", "unlisted"];
+const TIER_ORDER: readonly QuotaTier[] = ["high-volume", "free", "balanced", "scarce"];
 
 // Keyed by the exact `tier` value that opencode_list_agents reports per model,
 // so the reading agent can match the JSON value to its guidance literally.
 const TIER_GUIDE: Record<QuotaTier, string> = {
   "high-volume":
     "3,000+ req/5h — default: exploration, mechanical edits, boilerplate, docs, tests, simple fixes",
+  free: "unlimited req/5h (free model) — zero budget cost; use freely for high-volume work",
   balanced: "500-2,999 req/5h — standard features, non-trivial debugging, code review",
   scarce:
     "under 500 req/5h — architecture, cross-cutting refactors, hard debugging; use only for the step that needs it",
-  unlisted: "no published estimate (quota is null) — treat as scarce until confirmed",
 };
 
 /** Bucket a model by its 5h request estimate. Thresholds live here only. */
 export function quotaTier(perFiveHours: number | null): QuotaTier {
-  if (perFiveHours === null) return "unlisted";
+  if (perFiveHours === null) return "free";
   if (perFiveHours >= HIGH_VOLUME_MIN) return "high-volume";
   if (perFiveHours >= BALANCED_MIN) return "balanced";
   return "scarce";
@@ -298,7 +298,13 @@ export function quotaTier(perFiveHours: number | null): QuotaTier {
  * are simply absent, which callers report as "no published quota".
  */
 export function quotaByModelId(limits: UsageLimits): Map<string, ModelQuota> {
-  return new Map(limits.models.map((model) => [slugifyModelName(model.model), model]));
+  const index = new Map<string, ModelQuota>();
+  for (const model of limits.models) {
+    const slug = slugifyModelName(model.model);
+    index.set(slug.replace(/\./g, "-"), model);
+    index.set(slug, model);
+  }
+  return index;
 }
 
 function slugifyModelName(name: string): string {

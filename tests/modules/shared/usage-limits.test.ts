@@ -184,6 +184,24 @@ describe("parseUsageLimits", () => {
 
     expect(parseUsageLimits(html)).toBeNull();
   });
+
+  it("treats Unlimited/Ilimitado cells as unmetered and keeps parsing following rows", () => {
+    const html = `
+      <table>
+        <tr><td>peticiones por 5 horas</td></tr>
+        <tr><td>Beam Free</td><td>Unlimited</td><td>Ilimitado</td><td>Ilimitados</td></tr>
+        <tr><td>Beam Scarce</td><td>100</td><td>250</td><td>500</td></tr>
+        <tr><td>Beam Balanced</td><td>1,000</td><td>2,500</td><td>5,000</td></tr>
+      </table>`;
+
+    const parsed = parseUsageLimits(html);
+
+    expect(parsed?.models).toEqual([
+      { model: "Beam Free", perFiveHours: null, perWeek: null, perMonth: null },
+      { model: "Beam Scarce", perFiveHours: 100, perWeek: 250, perMonth: 500 },
+      { model: "Beam Balanced", perFiveHours: 1_000, perWeek: 2_500, perMonth: 5_000 },
+    ]);
+  });
 });
 
 describe("getUsageLimits", () => {
@@ -305,7 +323,7 @@ describe("quotaTier", () => {
     expect(quotaTier(2_999)).toBe("balanced");
     expect(quotaTier(500)).toBe("balanced");
     expect(quotaTier(499)).toBe("scarce");
-    expect(quotaTier(null)).toBe("unlisted");
+    expect(quotaTier(null)).toBe("free");
   });
 });
 
@@ -334,6 +352,24 @@ describe("quotaByModelId", () => {
     );
 
     expect(index.has("muse-spark-1.2-contributor")).toBe(true);
+  });
+
+  it("indexes models under both dot-preserving and dot-to-dash slugs", () => {
+    const index = quotaByModelId(
+      limitsFixture({
+        models: [
+          {
+            model: "Claude Haiku 5.5",
+            perFiveHours: 5_000,
+            perWeek: 12_500,
+            perMonth: 25_000,
+          },
+        ],
+      }),
+    );
+
+    expect(index.get("claude-haiku-5.5")?.perFiveHours).toBe(5_000);
+    expect(index.get("claude-haiku-5-5")?.perFiveHours).toBe(5_000);
   });
 });
 
@@ -376,7 +412,7 @@ describe("formatTierGuide", () => {
     expect(guide).toContain("- high-volume: 3,000+ req/5h — default:");
     expect(guide).toContain("- balanced: 500-2,999 req/5h —");
     expect(guide).toContain("- scarce: under 500 req/5h —");
-    expect(guide).toContain("- unlisted: no published estimate (quota is null)");
+    expect(guide).toContain("- free: unlimited req/5h (free model)");
     expect(guide.split("\n")).toHaveLength(4);
   });
 });

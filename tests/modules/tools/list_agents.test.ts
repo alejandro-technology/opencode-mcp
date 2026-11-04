@@ -204,12 +204,72 @@ describe("opencode_list_agents", () => {
     });
     expect(payload.models.providers[0].models).toEqual([
       { id: "mimo-v2.5", quota: { per_5h: 30_100, tier: "high-volume" } },
+      { id: "ox-alpha-free", quota: { per_5h: 3_000, tier: "free" } },
       { id: "glm-5.2", quota: { per_5h: 880, tier: "balanced" } },
       { id: "grok-4.5", quota: { per_5h: 120, tier: "scarce" } },
-      { id: "ox-alpha-free", quota: { per_5h: null, tier: "unlisted" } },
     ]);
     // Not an OpenCode Go model: no row in the docs table.
     expect(payload.models.providers[1].models).toEqual([{ id: "big-pickle", quota: null }]);
+  });
+
+  it("sorts models by tier and per_5h descending, and joins dot-to-dash ids", async () => {
+    registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
+    getUsageLimitsMock.mockResolvedValue({
+      source: "https://opencode.ai/docs/es/go/#l\u00edmites-de-uso",
+      fetchedAt: "2026-08-21T10:00:00.000Z",
+      spendBudget: { fiveHours: "$12", weekly: "$30", monthly: "$60" },
+      models: [
+        { model: "Claude Haiku 5.5", perFiveHours: 5_000, perWeek: 12_500, perMonth: 25_000 },
+        { model: "MiMo-V2.5", perFiveHours: 30_100, perWeek: 75_200, perMonth: 150_400 },
+        { model: "GLM-5.2", perFiveHours: 880, perWeek: 2_150, perMonth: 4_300 },
+        { model: "Grok 4.5", perFiveHours: 120, perWeek: 300, perMonth: 600 },
+        { model: "Ox Alpha Free", perFiveHours: null, perWeek: null, perMonth: null },
+      ],
+    });
+    mockClient({
+      providers: {
+        data: {
+          providers: [
+            {
+              id: "opencode-go",
+              name: "OpenCode Go",
+              models: {
+                "grok-4.5": {},
+                "mimo-v2.5": {},
+                "ox-alpha-free": {},
+                "claude-haiku-5-5": {},
+                "glm-5.2": {},
+              },
+            },
+            {
+              id: "opencode",
+              name: "OpenCode",
+              models: { "big-pickle": {}, "tiny-pickle": {} },
+            },
+          ],
+          default: {},
+        },
+      },
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+    const handler = fake.getHandler();
+
+    const result = await handler({ server_id: "srv-1" });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.models.providers[0].models).toEqual([
+      { id: "mimo-v2.5", quota: { per_5h: 30_100, tier: "high-volume" } },
+      { id: "claude-haiku-5-5", quota: { per_5h: 5_000, tier: "high-volume" } },
+      { id: "ox-alpha-free", quota: { per_5h: 3_000, tier: "free" } },
+      { id: "glm-5.2", quota: { per_5h: 880, tier: "balanced" } },
+      { id: "grok-4.5", quota: { per_5h: 120, tier: "scarce" } },
+    ]);
+    // OpenCode provider models have no docs row, so they sort after free.
+    expect(payload.models.providers[1].models).toEqual([
+      { id: "big-pickle", quota: null },
+      { id: "tiny-pickle", quota: null },
+    ]);
   });
 
   it("defaults to empty collections when data is missing", async () => {

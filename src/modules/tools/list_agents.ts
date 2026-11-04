@@ -8,6 +8,7 @@ import { clientForServer } from "../shared/opencode-client.js";
 import { getServer } from "../shared/server-registry.js";
 import {
   getUsageLimits,
+  HIGH_VOLUME_MIN,
   type ModelQuota,
   type QuotaTier,
   quotaByModelId,
@@ -42,20 +43,29 @@ interface ModelSummary {
   /** The model id to combine with `provider` as "provider/id". */
   id: string;
   /** OpenCode Go quota for this model, or `null` when the docs list none. */
-  quota: { per_5h: number | null; tier: QuotaTier } | null;
+  quota: { per_5h: number; tier: QuotaTier } | null;
+}
+
+function modelSortScore(model: ModelSummary): number {
+  return model.quota ? model.quota.per_5h : -1;
 }
 
 function toProviderSummary(provider: Provider, quotas: Map<string, ModelQuota>) {
   return {
     provider: provider.id,
     name: provider.name,
-    models: Object.keys(provider.models).map((id) => toModelSummary(id, quotas.get(id))),
+    models: Object.keys(provider.models)
+      .map((id) => toModelSummary(id, quotas.get(id)))
+      .sort((a, b) => modelSortScore(b) - modelSortScore(a)),
   };
 }
 
 function toModelSummary(id: string, quota: ModelQuota | undefined): ModelSummary {
   if (!quota) return { id, quota: null };
-  return { id, quota: { per_5h: quota.perFiveHours, tier: quotaTier(quota.perFiveHours) } };
+  return {
+    id,
+    quota: { per_5h: quota.perFiveHours ?? HIGH_VOLUME_MIN, tier: quotaTier(quota.perFiveHours) },
+  };
 }
 
 // Tells the caller whether a `quota: null` means "not an OpenCode Go model" or
