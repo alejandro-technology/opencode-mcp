@@ -9,21 +9,103 @@ Releases before `1.2.0` predate this file and are not documented here.
 
 ## Unreleased
 
-## [1.3.1] — 2026-10-28
+## [1.4.0] — 2026-11-08
+
+Version `1.3.1` was prepared in the repository but never published to npm — its
+changes are folded into this release, so npm users go directly from `1.3.0` to
+`1.4.0`. On top of that, this release makes headless delegation work on
+OpenCode `1.19.5`, verified against a live server.
+
+### Behavior changes callers must handle
+
+- **`opencode_wait_for_task` clamps timeouts at 55 s by default** (was 300 s).
+  The calling host's own MCP request timeout aborts longer tool calls with
+  `MCP error -32001: Request timed out` before the tool's graceful
+  `timed_out` payload can be delivered (observed live at 290 s and 100 s
+  waits). Returning gracefully at 55 s with `timed_out: true` always beats
+  getting the transport error; agents should loop the wait instead of raising
+  `timeout_ms`. `MCP_TOOL_TIMEOUT` (env var or `MCP_TOOL_TIMEOUT=<ms>` CLI
+  arg) raises the clamp only when the host demonstrably tolerates longer
+  requests.
+
+### Added
+
+- **Permission approvals for OpenCode `1.19.5`, verified live.** The headless
+  permission responder now drains both surfaces: the legacy `/event` SSE
+  subscription (for `1.18.x` servers) and — when the base URL is known — a 1 s
+  REST drain of `GET /api/permission/request` + reply, because the `1.19.x`
+  core v2 tool stack publishes permission asks only on the REST endpoint. A
+  FIFO dedupe set prevents double replies, and 404s from already-resolved asks
+  are swallowed.
+- **Everything under the launch root is auto-approved.** Under the default
+  `read-only` policy with a launch directory, the `external_directory`
+  permission becomes a root-object rule (`{ "<root>/**": "allow" }`), so tasks
+  scoped to any directory below the launch root touch anything inside the
+  server's tree with zero permission round-trips; `read`/`edit`/`bash` deny
+  globs survive the deep merge untouched.
+- **Subagent (child) sessions are auto-accepted.** Permission responses route
+  by server, directory, and registered session; a delegated task's subagents
+  run as child sessions whose asks were previously skipped by responders bound
+  to registered ids, wedging unattended tasks. A 3 s children poller closes
+  the race where an ask arrives just before the child session is known.
+- `opencode_start_server` accepts an optional `external_directory` input
+  (`read-only` | `allow` | `deny`) with precedence tool param >
+  `OPENCODE_MCP_EXTERNAL_DIR` env var > `OPENCODE_MCP_EXTERNAL_DIR=<policy>`
+  CLI arg > `read-only` default. It reports its effective launch directory and
+  walks to the next port when the default is taken.
+- Shell permission asks are grounded by resource pattern: a bash ask whose
+  patterns sit inside the launch root is approved `once`, and one outside the
+  root is rejected under `read-only` (`allow`/`deny` policies unchanged).
+  External reads are answered `once`, never `always`, because an `always`
+  reply persists keyed by directory pattern rather than by operation.
+- Tool errors now state the directory anchor: OpenCode spawns MCP processes
+  per session with cwd = the session location, and `workspace.source_directory`
+  in `start_task` responses is the machine-checkable truth for where a task ran.
+- `docs/sqlite-persistence-plan.md` — plan for SQLite-based persistence of
+  task history, server records, and retained worktrees across restarts.
+- Three live-verified reports under `docs/`: task execution, MCP tool
+  evaluation, and permission behavior on OpenCode `1.19.5`.
 
 ### Changed
 
-- Declare the existing Node.js 18+ runtime requirement in package metadata. Document Node.js 22.18+ for development and native TypeScript smoke tests; CI now checks the development suite on Node.js 22 and 24.
-- Shorten the README's "How it works" section while retaining execution reports, managed worktrees, and usage reporting. Document process-local state, permission policies, and the trust boundary.
-- Clarify that the adapter targets OpenCode 1.x; OpenCode 2.x compatibility is not yet supported.
-- Sort the models in each `opencode_list_agents` provider entry by descending 5h request estimate so the cheapest-to-run listings are surfaced first. Free/preview model ids absent from the OpenCode Go quota table now report a `"free"` tier with `per_5h: 3000` instead of a null quota and an `unlisted` tier, and Quota rows whose request cells read `Unlimited`/`Ilimitado` parse to unlimited estimates instead of empty. Slug indexing also matches model ids containing dots (dot normalized to hyphen).
+- Declare the existing Node.js 18+ runtime requirement in package metadata.
+  Document Node.js 22.18+ for development and native TypeScript smoke tests;
+  CI now checks the development suite on Node.js 22 and 24.
+- Shorten the README's "How it works" section while retaining execution
+  reports, managed worktrees, and usage reporting. Document process-local
+  state, permission policies, and the trust boundary; lead the README with the
+  context-window economics of delegating to subagents.
+- Clarify that the adapter targets OpenCode `1.x` (now validated against
+  `1.18.34` and `1.19.5`); OpenCode 2.x compatibility is not yet supported.
+  The OpenCode SDK dependency is bumped to `^1.19.5`.
+- Sort the models in each `opencode_list_agents` provider entry by descending
+  5h request estimate so the cheapest-to-run listings are surfaced first.
+  Free/preview model ids absent from the OpenCode Go quota table now report a
+  `"free"` tier with `per_5h: 3000` instead of a null quota and an `unlisted`
+  tier, and Quota rows whose request cells read `Unlimited`/`Ilimitado` parse
+  to unlimited estimates instead of empty. Slug indexing also matches model
+  ids containing dots (dot normalized to hyphen).
 
 ### Fixed
 
-- Align the MCP server's advertised version with package version `1.3.1` instead of reporting `1.2.0`, with a regression test to catch future drift.
-- Use the system temporary directory for smoke fixtures instead of a machine-specific path. Allow the paid smoke model to be selected with `OPENCODE_MCP_SMOKE_MODEL`, preserving the existing default.
-- Remove references to the unregistered `delegate_task` prompt and nonexistent source directories; correct contributor test commands and typechecking guidance.
-- Limit TypeScript compilation to existing source paths and exclude test utilities from build output and the npm package.
+- Delegated tasks stop wedging forever on unattended permission asks: pending
+  requests are drained over REST as well as SSE, subagent asks are
+  auto-accepted, and shell asks are grounded against the launch root.
+- Terminal wait results propagate the run's cached failure diagnosis, so the
+  reason a task failed is visible in `opencode_wait_for_task` output rather
+  than only through status/result.
+- All `not_found` / `invalid_directory` tool errors carry actionable messages
+  that name what could not be resolved.
+- The advertised version is derived from the package version with a regression
+  test to catch future drift.
+- Use the system temporary directory for smoke fixtures instead of a
+  machine-specific path. Allow the paid smoke model to be selected with
+  `OPENCODE_MCP_SMOKE_MODEL`, preserving the existing default.
+- Remove references to the unregistered `delegate_task` prompt and nonexistent
+  source directories; correct contributor test commands and typechecking
+  guidance.
+- Limit TypeScript compilation to existing source paths and exclude test
+  utilities from build output and the npm package.
 
 ## [1.3.0] — 2026-10-19
 
