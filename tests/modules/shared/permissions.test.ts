@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -6,6 +7,7 @@ import {
   decidePermission,
   type ExternalDirectoryPolicy,
   getExternalDirectoryPolicy,
+  groundExternalPatterns,
   type PermissionAsk,
   type PermissionResponder,
   permissionCallID,
@@ -146,14 +148,84 @@ describe("buildServerConfig", () => {
     });
   });
 
+  it("allows the whole launch tree natively when a root directory is provided", () => {
+    expect(buildServerConfig("read-only", { rootDirectory: "/repo/app" })).toEqual({
+      permission: { external_directory: { "/repo/app/**": "allow" } },
+    });
+  });
+
   it("maps allow and deny straight through to the config", () => {
     expect(buildServerConfig("allow")).toEqual({ permission: { external_directory: "allow" } });
     expect(buildServerConfig("deny")).toEqual({ permission: { external_directory: "deny" } });
   });
 
+  it("ignores the root directory under allow and deny", () => {
+    expect(buildServerConfig("allow", { rootDirectory: "/repo/app" })).toEqual({
+      permission: { external_directory: "allow" },
+    });
+    expect(buildServerConfig("deny", { rootDirectory: "/repo/app" })).toEqual({
+      permission: { external_directory: "deny" },
+    });
+  });
+
   it("touches only external_directory so user deny globs survive the merge", () => {
     const config = buildServerConfig("read-only");
     expect(Object.keys(config.permission ?? {})).toEqual(["external_directory"]);
+  });
+});
+
+describe("groundExternalPatterns", () => {
+  const root = "/work/project";
+
+  it("accepts an absolute path inside the root", () => {
+    expect(groundExternalPatterns([`${root}/sub/file.ts`], root)).toBe(true);
+  });
+
+  it("accepts the root itself", () => {
+    expect(groundExternalPatterns([root], root)).toBe(true);
+  });
+
+  it("accepts the root with a trailing slash", () => {
+    expect(groundExternalPatterns([`${root}/`], root)).toBe(true);
+  });
+
+  it("accepts a single-star resource pattern after stripping it", () => {
+    expect(groundExternalPatterns([`${root}/*`], root)).toBe(true);
+    expect(groundExternalPatterns([`${root}/**`], root)).toBe(true);
+  });
+
+  it("rejects a path outside the root", () => {
+    expect(groundExternalPatterns(["/work/other/file.ts"], root)).toBe(false);
+  });
+
+  it("rejects a sibling whose name merely starts with the root", () => {
+    expect(groundExternalPatterns([`${root}-evil/file.ts`], root)).toBe(false);
+  });
+
+  it("rejects a relative pattern", () => {
+    expect(groundExternalPatterns(["project/file.ts"], root)).toBe(false);
+  });
+
+  it("rejects a non-string entry", () => {
+    expect(groundExternalPatterns([42], root)).toBe(false);
+  });
+
+  it("rejects a missing or empty pattern list", () => {
+    expect(groundExternalPatterns(undefined, root)).toBe(false);
+    expect(groundExternalPatterns([], root)).toBe(false);
+  });
+
+  it("expands a leading tilde before checking containment", () => {
+    expect(groundExternalPatterns([`${homedir()}/secrets`], root)).toBe(false);
+    expect(groundExternalPatterns(["~/secrets"], root)).toBe(false);
+  });
+
+  it("normalises windows backslashes", () => {
+    expect(groundExternalPatterns(["/work/project\\sub\\file.ts"], root)).toBe(true);
+  });
+
+  it("requires every pattern to be grounded", () => {
+    expect(groundExternalPatterns([`${root}/a`, "/elsewhere/b"], root)).toBe(false);
   });
 });
 
@@ -164,7 +236,7 @@ describe("decidePermission", () => {
       client,
       ask({ permission: "bash", metadata: { command: "git commit -m x" } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision).toEqual({
       response: "always",
@@ -178,20 +250,20 @@ describe("decidePermission", () => {
       client,
       { id: "p", sessionID: "s", type: "bash" },
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision.response).toBe("always");
   });
 
   it("approves external access with always under the allow policy", async () => {
     const { client } = fakeClient();
-    const decision = await decidePermission(client, ask(), "allow", noSleep);
+    const decision = await decidePermission(client, ask(), "allow", { sleep: noSleep });
     expect(decision.response).toBe("always");
   });
 
   it("rejects external access under the deny policy", async () => {
     const { client } = fakeClient();
-    const decision = await decidePermission(client, ask(), "deny", noSleep);
+    const decision = await decidePermission(client, ask(), "deny", { sleep: noSleep });
     expect(decision.response).toBe("reject");
   });
 
@@ -201,7 +273,7 @@ describe("decidePermission", () => {
       client,
       ask({ metadata: { command: "rm -rf /tmp/x", directories: ["/tmp"] } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision).toEqual({
       response: "reject",
@@ -212,7 +284,7 @@ describe("decidePermission", () => {
 
   it("approves an external read with once, not always", async () => {
     const { client, raw } = fakeClient();
-    const decision = await decidePermission(client, ask(), "read-only", noSleep);
+    const decision = await decidePermission(client, ask(), "read-only", { sleep: noSleep });
     expect(decision).toEqual({ response: "once", reason: "'read' only reads" });
     // The call id encodes the tool, so no message round-trip is needed.
     expect(raw.session.messages).not.toHaveBeenCalled();
@@ -225,12 +297,9 @@ describe("decidePermission", () => {
     "webfetch_12",
   ])("approves the read-only call id %s", async (callID) => {
     const { client } = fakeClient();
-    const decision = await decidePermission(
-      client,
-      ask({ tool: { callID } }),
-      "read-only",
-      noSleep,
-    );
+    const decision = await decidePermission(client, ask({ tool: { callID } }), "read-only", {
+      sleep: noSleep,
+    });
     expect(decision.response).toBe("once");
   });
 
@@ -240,7 +309,7 @@ describe("decidePermission", () => {
       client,
       ask({ tool: { callID: "write_0" } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision).toEqual({
       response: "reject",
@@ -250,7 +319,9 @@ describe("decidePermission", () => {
 
   it("rejects when the permission carries no call id", async () => {
     const { client, raw } = fakeClient();
-    const decision = await decidePermission(client, ask({ tool: undefined }), "read-only", noSleep);
+    const decision = await decidePermission(client, ask({ tool: undefined }), "read-only", {
+      sleep: noSleep,
+    });
     expect(decision).toEqual({
       response: "reject",
       reason: "could not identify the tool behind the request",
@@ -264,7 +335,7 @@ describe("decidePermission", () => {
       client,
       ask({ tool: { callID: "opaque" } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision.response).toBe("once");
     expect(raw.session.messages).toHaveBeenCalledOnce();
@@ -276,7 +347,7 @@ describe("decidePermission", () => {
       client,
       ask({ tool: { callID: "opaque" } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision.response).toBe("reject");
     expect(raw.session.messages).toHaveBeenCalledTimes(3);
@@ -288,7 +359,7 @@ describe("decidePermission", () => {
       client,
       ask({ tool: { callID: "opaque" } }),
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision.response).toBe("reject");
   });
@@ -316,9 +387,104 @@ describe("decidePermission", () => {
       client,
       { id: "p", sessionID: "s", permission: "external_directory", tool: { callID: "read_0" } },
       "read-only",
-      noSleep,
+      { sleep: noSleep },
     );
     expect(decision.response).toBe("once");
+  });
+
+  it("approves a shell command whose patterns stay inside the root", async () => {
+    const { client, raw } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({ tool: { callID: "bash_0" }, patterns: ["/work/project/pkg/*"], metadata: {} }),
+      "read-only",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision).toEqual({
+      response: "once",
+      reason: "shell command inside the server working directory",
+    });
+    expect(raw.session.messages).not.toHaveBeenCalled();
+  });
+
+  it("rejects a shell command with patterns partly outside the root", async () => {
+    const { client } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({
+        tool: { callID: "bash_0" },
+        patterns: ["/work/project/pkg/*", "/elsewhere/*"],
+        metadata: {},
+      }),
+      "read-only",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision).toEqual({
+      response: "reject",
+      reason: "shell command outside the working directory",
+    });
+  });
+
+  it("rejects a shell command that carries no patterns", async () => {
+    const { client } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({ tool: { callID: "bash_0" }, patterns: undefined, metadata: {} }),
+      "read-only",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision.response).toBe("reject");
+  });
+
+  it("grounds a metadata.command ask without a message round-trip", async () => {
+    const { client, raw } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({
+        tool: { callID: "opaque" },
+        patterns: ["/work/project/x"],
+        metadata: { command: "ls" },
+      }),
+      "read-only",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision).toEqual({
+      response: "once",
+      reason: "shell command inside the server working directory",
+    });
+    expect(raw.session.messages).not.toHaveBeenCalled();
+  });
+
+  it("leaves the allow policy unaffected by the root directory", async () => {
+    const { client } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({
+        tool: { callID: "bash_0" },
+        patterns: ["/elsewhere/*"],
+        metadata: { command: "ls" },
+      }),
+      "allow",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision).toEqual({
+      response: "always",
+      reason: "external_directory policy is 'allow'",
+    });
+  });
+
+  it("rejects a shell command outside the root under the deny policy", async () => {
+    const { client } = fakeClient();
+    const decision = await decidePermission(
+      client,
+      ask({ patterns: ["/elsewhere/*"], metadata: { command: "rm -rf /elsewhere" } }),
+      "deny",
+      { sleep: noSleep, rootDirectory: "/work/project" },
+    );
+    expect(decision).toEqual({
+      response: "reject",
+      reason: "external_directory policy is 'deny'",
+    });
   });
 });
 
@@ -611,6 +777,311 @@ describe("startPermissionResponder", () => {
     await responder.done;
     expect(receivedSignal?.aborted).toBe(true);
     expect(replies).toEqual([]);
+  });
+});
+
+describe("startPermissionResponder v2 drain", () => {
+  const baseUrl = "http://127.0.0.1:4096";
+
+  /** A v1 event stream that never yields, so the SSE loop stays dormant. */
+  function blockingSubscribe() {
+    return vi.fn((options?: { signal?: AbortSignal }) => {
+      const signal = options?.signal;
+      if (!signal) throw new Error("responder omitted abort signal");
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+  }
+
+  function jsonResponse(body: unknown, ok = true, status = 200) {
+    return { ok, status, json: async () => body } as unknown as Response;
+  }
+
+  function stubFetch(handler: (url: string, init?: RequestInit) => unknown) {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push({ url, init });
+      return handler(url, init);
+    });
+    vi.stubGlobal("fetch", mock);
+    const replies = () => calls.filter((call) => call.url.includes("/reply"));
+    return { calls, mock, replies };
+  }
+
+  function pending(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "per_1",
+      sessionID: "ses_1",
+      action: "external_directory",
+      resources: ["/work/project/pkg/*"],
+      metadata: {},
+      save: [],
+      source: { messageID: "msg_1", callID: "read_0" },
+      ...overrides,
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("lists pending requests with the encoded directory and replies to the right URL", async () => {
+    let responder!: PermissionResponder;
+    const directory = "/work/my project";
+    const decisions: unknown[] = [];
+    const { calls } = stubFetch((url) =>
+      url.includes("/api/permission/request")
+        ? jsonResponse({ data: [pending({ resources: [`${directory}/pkg/*`] })] })
+        : jsonResponse({}),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    responder = startPermissionResponder(client, {
+      policy: "read-only",
+      baseUrl,
+      directory,
+      sleep: async () => responder.stop(),
+      onDecision: (a, d) => decisions.push([a.id, d.response]),
+    });
+    await responder.done;
+
+    expect(calls[0].url).toBe(
+      `${baseUrl}/api/permission/request?directory=${encodeURIComponent(directory)}`,
+    );
+    const reply = calls.find((call) => call.url.includes("/reply"));
+    expect(reply?.url).toBe(`${baseUrl}/api/session/ses_1/permission/per_1/reply`);
+    expect(reply?.init).toMatchObject({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reply: "once" }),
+    });
+    expect(decisions).toEqual([["per_1", "once"]]);
+  });
+
+  it("omits the directory query and tolerates a missing source", async () => {
+    let responder!: PermissionResponder;
+    const { calls } = stubFetch((url) =>
+      url.includes("/api/permission/request")
+        ? jsonResponse({
+            data: [pending({ source: undefined, metadata: { command: "ls" }, resources: [] })],
+          })
+        : jsonResponse({}),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    responder = startPermissionResponder(client, {
+      policy: "deny",
+      baseUrl,
+      sleep: async () => responder.stop(),
+    });
+    await responder.done;
+
+    expect(calls[0].url).toBe(`${baseUrl}/api/permission/request`);
+    const reply = calls.find((call) => call.url.includes("/reply"));
+    expect(JSON.parse(String(reply?.init?.body))).toEqual({ reply: "reject" });
+  });
+
+  it("skips unowned sessions without marking them handled, then answers once accepted", async () => {
+    let responder!: PermissionResponder;
+    const allowed = new Set<string>();
+    const { replies } = stubFetch((url) =>
+      url.includes("/api/permission/request")
+        ? jsonResponse({ data: [pending()] })
+        : jsonResponse({}),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+    let sleeps = 0;
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      allowedSessionIDs: () => allowed,
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 1) {
+          allowed.add("ses_1");
+          return;
+        }
+        responder.stop();
+      },
+    });
+    await responder.done;
+
+    expect(replies()).toHaveLength(1);
+  });
+
+  it("marks a request handled so the next tick does not answer it again", async () => {
+    let responder!: PermissionResponder;
+    const { replies } = stubFetch((url) =>
+      url.includes("/api/permission/request")
+        ? jsonResponse({ data: [pending()] })
+        : jsonResponse({}),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+    let sleeps = 0;
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 2) responder.stop();
+      },
+    });
+    await responder.done;
+
+    expect(replies()).toHaveLength(1);
+  });
+
+  it("reports a non-ok list response and keeps polling", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    stubFetch(() => jsonResponse({}, false, 404));
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+    let sleeps = 0;
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      onError: (error) => errors.push(error),
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 1) responder.stop();
+      },
+    });
+    await responder.done;
+
+    expect((errors[0] as Error).message).toBe("permission list failed: HTTP 404");
+  });
+
+  it("reports a non-ok reply and does not retry the same request", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    const { replies } = stubFetch((url) =>
+      url.includes("/api/permission/request")
+        ? jsonResponse({ data: [pending()] })
+        : jsonResponse({}, false, 404),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+    let sleeps = 0;
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      onError: (error) => errors.push(error),
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 2) responder.stop();
+      },
+    });
+    await responder.done;
+
+    expect((errors[0] as Error).message).toBe("permission reply failed: HTTP 404");
+    expect(replies()).toHaveLength(1);
+  });
+
+  it("reports a thrown list fetch and keeps looping", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    stubFetch(() => {
+      throw new Error("network down");
+    });
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+    let sleeps = 0;
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      onError: (error) => errors.push(error),
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 1) responder.stop();
+      },
+    });
+    await responder.done;
+
+    expect((errors[0] as Error).message).toBe("network down");
+  });
+
+  it("stops promptly while waiting for the next poll", async () => {
+    const { mock } = stubFetch(() => jsonResponse({ data: [] }));
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    const responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      sleep: () => new Promise<void>(() => {}),
+    });
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    responder.stop();
+    await responder.done;
+  });
+
+  it("caps the handled-id memory at 512 entries", async () => {
+    let responder!: PermissionResponder;
+    const items = Array.from({ length: 513 }, (_, index) =>
+      pending({ id: `per_${index}`, source: undefined }),
+    );
+    const { replies } = stubFetch((url) =>
+      url.includes("/api/permission/request") ? jsonResponse({ data: items }) : jsonResponse({}),
+    );
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    responder = startPermissionResponder(client, {
+      policy: "deny",
+      baseUrl,
+      sleep: async () => responder.stop(),
+    });
+    await responder.done;
+
+    expect(replies()).toHaveLength(513);
+  });
+
+  it("handles a list body with no data and exits silently when stopped during a fetch", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    let calls = 0;
+    stubFetch(() => {
+      calls++;
+      if (calls === 1) return jsonResponse({});
+      responder.stop();
+      throw new Error("aborted");
+    });
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      onError: (error) => errors.push(error),
+      sleep: async () => {},
+    });
+    await responder.done;
+
+    expect(errors).toEqual([]);
+  });
+
+  it("exits silently when stopped during a reply failure", async () => {
+    let responder!: PermissionResponder;
+    const errors: unknown[] = [];
+    stubFetch((url) => {
+      if (url.includes("/api/permission/request")) return jsonResponse({ data: [pending()] });
+      responder.stop();
+      throw new Error("aborted");
+    });
+    const { client } = fakeClient({ subscribe: blockingSubscribe() });
+
+    responder = startPermissionResponder(client, {
+      policy: "allow",
+      baseUrl,
+      onError: (error) => errors.push(error),
+      sleep: async () => responder.stop(),
+    });
+    await responder.done;
+
+    expect(errors).toEqual([]);
   });
 });
 

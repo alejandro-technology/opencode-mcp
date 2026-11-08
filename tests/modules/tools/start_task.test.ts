@@ -31,7 +31,12 @@ describe("opencode_start_task", () => {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ server_id: "missing", status: "server_not_found" }),
+          text: JSON.stringify({
+            server_id: "missing",
+            status: "server_not_found",
+            message:
+              "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
+          }),
         },
       ],
     });

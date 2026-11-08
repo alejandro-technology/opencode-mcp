@@ -102,7 +102,12 @@ export function registerOpencodeStartTask(server: McpServer) {
     }) => {
       const server = getServer(server_id);
       if (!server) {
-        return jsonError({ server_id, status: "server_not_found" });
+        return jsonError({
+          server_id,
+          status: "server_not_found",
+          message:
+            "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
+        });
       }
 
       let parsedModel: { providerID: string; modelID: string } | undefined;
@@ -127,12 +132,22 @@ export function registerOpencodeStartTask(server: McpServer) {
             resolve(server.directory ?? process.cwd(), directory ?? "."),
           );
           if (!(await stat(sourceDirectory)).isDirectory()) {
-            return jsonError({ server_id, status: "invalid_directory", directory });
+            return jsonError({
+              server_id,
+              status: "invalid_directory",
+              directory,
+              message: `directory is not a folder; paths resolve against the server launch directory (${server.directory}); use a full absolute path if the server root is not what you expect`,
+            });
           }
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code === "ENOENT" || code === "ENOTDIR") {
-            return jsonError({ server_id, status: "invalid_directory", directory });
+            return jsonError({
+              server_id,
+              status: "invalid_directory",
+              directory,
+              message: `directory does not exist yet; paths resolve against the server launch directory (${server.directory}) — create it first or pass an absolute path`,
+            });
           }
           throw error;
         }
@@ -161,6 +176,8 @@ export function registerOpencodeStartTask(server: McpServer) {
           return jsonError({
             server_id,
             status: "server_not_found",
+            message:
+              "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
             ...(workspaceMetadata.managed
               ? { workspace: workspaceMetadata, workspace_id: workspaceId }
               : {}),

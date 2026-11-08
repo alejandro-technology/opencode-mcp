@@ -155,7 +155,12 @@ export function registerOpencodeWaitForTask(server: McpServer) {
       }
 
       if (unknownIds.length > 0) {
-        return jsonError({ task_ids: unknownIds, status: "not_found" });
+        return jsonError({
+          task_ids: unknownIds,
+          status: "not_found",
+          message:
+            "unknown task_id(s); only ids returned by opencode_start_task or opencode_continue_task are trackable (the MCP process does not persist tasks across restarts)",
+        });
       }
 
       const timeout = Math.min(timeout_ms ?? DEFAULT_TIMEOUT_MS, getMaxToolTimeoutMs());
@@ -276,14 +281,32 @@ export function registerOpencodeWaitForTask(server: McpServer) {
   );
 }
 
+/** Statuses that always want their cause surfaced in the wait response. */
+const TROUBLE_STATUSES = new Set<WaitTaskResult["status"]>([
+  "failed",
+  "empty",
+  "cancelled",
+  "error",
+]);
+
 function addReports(tasks: WaitTaskResult[]): Array<WaitTaskResult | Record<string, unknown>> {
   return tasks.map((result) => {
     const task = getTask(result.task_id);
     const run = task?.runs?.find((item) => item.run_id === task.currentRunId);
     if (!run) return result;
+    // Terminal per-task failures carry their diagnosis in the cached result
+    // (e.g. the "no output, prompt likely rejected" heuristic). Copy it so a
+    // failing wait reports why, instead of forcing a follow-up get_task_result.
+    const diagnostic = (run.result?.error ?? run.result?.message) as string | undefined;
     return {
       ...result,
       ...(run.reportReady && run.executionState ? { status: run.executionState } : {}),
+      ...(TROUBLE_STATUSES.has(result.status) &&
+      result.error === undefined &&
+      !("message" in result) &&
+      diagnostic
+        ? { error: diagnostic }
+        : {}),
       run_id: run.run_id,
       changes: run.report?.changes ?? [],
       verification: run.report?.verification ?? { state: "pending", checks: [] },

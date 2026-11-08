@@ -57,7 +57,15 @@ describe("opencode_list_agents", () => {
     expect(result).toEqual({
       isError: true,
       content: [
-        { type: "text", text: JSON.stringify({ server_id: "missing", status: "not_found" }) },
+        {
+          type: "text",
+          text: JSON.stringify({
+            server_id: "missing",
+            status: "not_found",
+            message:
+              "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
+          }),
+        },
       ],
     });
   });

@@ -42,7 +42,15 @@ describe("opencode_get_task_result", () => {
     expect(result).toEqual({
       isError: true,
       content: [
-        { type: "text", text: JSON.stringify({ task_id: "missing", status: "not_found" }) },
+        {
+          type: "text",
+          text: JSON.stringify({
+            task_id: "missing",
+            status: "not_found",
+            message:
+              "unknown task_id; only ids returned by opencode_start_task or opencode_continue_task are trackable (the MCP process does not persist tasks across restarts)",
+          }),
+        },
       ],
     });
   });

@@ -46,7 +46,15 @@ describe("opencode_wait_for_task", () => {
     expect(result).toEqual({
       isError: true,
       content: [
-        { type: "text", text: JSON.stringify({ task_ids: ["missing"], status: "not_found" }) },
+        {
+          type: "text",
+          text: JSON.stringify({
+            task_ids: ["missing"],
+            status: "not_found",
+            message:
+              "unknown task_id(s); only ids returned by opencode_start_task or opencode_continue_task are trackable (the MCP process does not persist tasks across restarts)",
+          }),
+        },
       ],
     });
     expect(deriveTaskStatusMock).not.toHaveBeenCalled();
@@ -163,6 +171,108 @@ describe("opencode_wait_for_task", () => {
       error: "ACK lost",
     });
     removeTask("uncertain-wait");
+  });
+
+  it("surfaces the cached failure diagnosis on terminal trouble statuses", async () => {
+    const reportReadyRun = (result: unknown) => ({
+      run_id: "run-x",
+      message_id: "msg-x",
+      startedAt: 1,
+      reportReady: true,
+      executionState: "failed" as const,
+      result,
+    });
+    registerTask({
+      taskId: "diag-inject-error",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-x",
+      runs: [reportReadyRun({ task_id: "diag-inject-error", status: "failed", error: "rejected" })],
+    });
+    registerTask({
+      taskId: "diag-inject-message",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-x",
+      runs: [
+        reportReadyRun({ task_id: "diag-inject-message", status: "empty", message: "empty turn" }),
+      ],
+    });
+    registerTask({
+      taskId: "diag-plain-failure",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-x",
+      runs: [reportReadyRun({ task_id: "diag-plain-failure", status: "failed" })],
+    });
+    registerTask({
+      taskId: "diag-derive-message",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-x",
+      runs: [{ run_id: "run-x", message_id: "msg-x", startedAt: 1 }],
+    });
+    registerTask({
+      taskId: "diag-preserved-error",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-x",
+      runs: [{ run_id: "run-x", message_id: "msg-x", startedAt: 1 }],
+    });
+    clientForTaskMock.mockReturnValue({ client: {}, sessionId: "s1" });
+    deriveTaskStatusMock.mockImplementation(async (_c, _s, taskId) =>
+      taskId === "diag-derive-message"
+        ? { task_id: taskId, status: "empty", message: "turn had no work" }
+        : { task_id: taskId, status: "failed", error: "kept" },
+    );
+    const fake = createFakeMcpServer();
+    registerOpencodeWaitForTask(fake.server);
+
+    const payload = JSON.parse(
+      (
+        await fake.getHandler()({
+          task_ids: [
+            "diag-inject-error",
+            "diag-inject-message",
+            "diag-plain-failure",
+            "diag-derive-message",
+            "diag-preserved-error",
+          ],
+          timeout_ms: 1,
+        })
+      ).content[0].text as string,
+    );
+
+    expect(
+      payload.tasks.find((t: { task_id: string }) => t.task_id === "diag-inject-error").error,
+    ).toBe("rejected");
+    expect(
+      payload.tasks.find((t: { task_id: string }) => t.task_id === "diag-inject-message").error,
+    ).toBe("empty turn");
+    const plain = payload.tasks.find(
+      (t: { task_id: string }) => t.task_id === "diag-plain-failure",
+    );
+    expect(plain.error).toBeUndefined();
+    const deriveMessage = payload.tasks.find(
+      (t: { task_id: string }) => t.task_id === "diag-derive-message",
+    );
+    expect(deriveMessage.message).toBe("turn had no work");
+    expect(deriveMessage.error).toBeUndefined();
+    const preserved = payload.tasks.find(
+      (t: { task_id: string }) => t.task_id === "diag-preserved-error",
+    );
+    expect(preserved.error).toBe("kept");
+    expect(Object.keys(preserved)).not.toContain("message");
+
+    for (const id of [
+      "diag-inject-error",
+      "diag-inject-message",
+      "diag-plain-failure",
+      "diag-derive-message",
+      "diag-preserved-error",
+    ]) {
+      removeTask(id);
+    }
   });
 
   it("times out a report wait whose tracked run has no backend and no final report yet", async () => {

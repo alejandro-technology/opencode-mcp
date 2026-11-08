@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
 import type { Config, OpencodeClient } from "@opencode-ai/sdk";
 
 /**
@@ -24,6 +26,17 @@ export interface PermissionAsk {
   tool?: { messageID?: string; callID?: string };
   /** Generated-SDK field. */
   callID?: string;
+}
+
+/** A pending request as the v2 REST surface lists it. */
+interface PendingPermissionItem {
+  id: string;
+  sessionID: string;
+  action?: string;
+  resources?: string[];
+  metadata?: Record<string, unknown>;
+  save?: string[];
+  source?: { messageID?: string; callID?: string };
 }
 
 /** Event types that carry a pending permission request. */
@@ -64,6 +77,12 @@ const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "webfetch", "websearch"
 
 /** Delay before re-subscribing after the event stream drops. */
 const RECONNECT_DELAY_MS = 1_000;
+
+/** Poll interval for the v2 pending-permission drain loop. */
+const PENDING_POLL_MS = 1_000;
+
+/** Upper bound on the remembered-handled permission ids. */
+const HANDLED_LIMIT = 512;
 
 /** Attempts to correlate a permission to its tool call before giving up. */
 const CORRELATION_ATTEMPTS = 3;
@@ -109,19 +128,44 @@ function parsePolicy(value: string | undefined): ExternalDirectoryPolicy | undef
 }
 
 /**
+ * The generated `Config` type only admits a scalar for this key, but the live
+ * server also accepts an object of glob rules. Keep the cast scoped here.
+ */
+type ExternalDirectoryConfig = NonNullable<Config["permission"]>["external_directory"];
+
+/**
  * Build the config handed to `createOpencodeServer`.
  *
  * OpenCode deep-merges this over the user's global config per permission key,
  * so only `external_directory` is touched — existing `read` / `edit` / `bash`
  * rules (including deny globs for secrets) survive untouched.
  *
- * `read-only` keeps the key on `ask` on purpose: the permission responder is
- * what applies the read/write split, and it can only do that if OpenCode still
- * raises the request.
+ * When `options.rootDirectory` is provided under `read-only`, the
+ * `external_directory` key becomes a single object rule allowing everything
+ * inside that tree. That object replaces any lower-level `external_directory`
+ * rules for the key (it does not merge with them); `read` / `edit` / `bash`
+ * entries are still untouched. Paths inside the server launch tree then need
+ * no permission round-trip at all.
+ *
+ * `read-only` without a root keeps the key on `ask` on purpose: the permission
+ * responder is what applies the read/write split, and it can only do that if
+ * OpenCode still raises the request.
  */
-export function buildServerConfig(policy: ExternalDirectoryPolicy): Config {
-  const external_directory = policy === "read-only" ? "ask" : policy;
-  return { permission: { external_directory } };
+export function buildServerConfig(
+  policy: ExternalDirectoryPolicy,
+  options: { rootDirectory?: string } = {},
+): Config {
+  if (policy === "read-only") {
+    const rootDirectory = options.rootDirectory;
+    if (rootDirectory === undefined) {
+      return { permission: { external_directory: "ask" } };
+    }
+    const rules = {
+      [`${rootDirectory}/**`]: "allow",
+    } as unknown as ExternalDirectoryConfig;
+    return { permission: { external_directory: rules } };
+  }
+  return { permission: { external_directory: policy } };
 }
 
 export type PermissionResponse = "once" | "always" | "reject";
@@ -167,6 +211,53 @@ async function resolveToolName(
   return undefined;
 }
 
+export interface PermissionDecisionOptions {
+  sleep?: (ms: number) => Promise<void>;
+  rootDirectory?: string;
+}
+
+/**
+ * True when every external-resource pattern resolves to a path inside
+ * `rootDirectory`.
+ *
+ * `external_directory` asks carry the canonical resource pattern of the
+ * directory that was touched (e.g. `/repo/ui/*`), so containment can be decided
+ * without correlating a tool call. Non-string entries, relative paths, and an
+ * empty pattern list fail closed.
+ */
+export function groundExternalPatterns(patterns: unknown, rootDirectory: string): boolean {
+  if (!Array.isArray(patterns) || patterns.length === 0) return false;
+
+  const root = rootDirectory.replace(/\/+$/, "");
+
+  return patterns.every((entry) => {
+    if (typeof entry !== "string") return false;
+
+    let pattern = entry.replace(/\/\*{1,2}$/, "");
+    if (pattern.startsWith("~")) pattern = `${homedir()}${pattern.slice(1)}`;
+    pattern = pattern.replace(/\\/g, "/").replace(/\/+$/, "");
+
+    if (!isAbsolute(pattern)) return false;
+    return pattern === root || `${pattern}/`.startsWith(`${root}/`);
+  });
+}
+
+/** A shell ask is recognisable from its metadata or its resolved tool name. */
+function isShellAsk(ask: PermissionAsk, resolvedToolName: string | undefined): boolean {
+  return ask.metadata?.command !== undefined || resolvedToolName === "bash";
+}
+
+function shellDecision(ask: PermissionAsk, rootDirectory: string | undefined): PermissionDecision {
+  const inside =
+    rootDirectory !== undefined &&
+    Array.isArray(ask.patterns) &&
+    groundExternalPatterns(ask.patterns, rootDirectory);
+
+  return inside
+    ? { response: "once", reason: "shell command inside the server working directory" }
+    : { response: "reject", reason: "shell command outside the working directory" };
+}
+
 /**
  * Decide how to answer a pending permission request.
  *
@@ -183,8 +274,11 @@ export async function decidePermission(
   client: OpencodeClient,
   ask: PermissionAsk,
   policy: ExternalDirectoryPolicy,
-  sleep: (ms: number) => Promise<void> = defaultSleep,
+  options: PermissionDecisionOptions = {},
 ): Promise<PermissionDecision> {
+  const sleep = options.sleep ?? defaultSleep;
+  const rootDirectory = options.rootDirectory;
+
   if (permissionKind(ask) !== EXTERNAL_DIRECTORY) {
     return { response: "always", reason: "inside the server working directory" };
   }
@@ -196,12 +290,14 @@ export async function decidePermission(
   }
 
   // Shell commands carry their own metadata shape and can write through any
-  // number of paths, so they never qualify as read-only.
-  if (ask.metadata?.command !== undefined) {
-    return { response: "reject", reason: "shell command outside the working directory" };
+  // number of paths. They are never read-only, but an ask that stays inside the
+  // server launch tree can still be approved without a round-trip.
+  const hasCommand = ask.metadata?.command !== undefined;
+  const tool = hasCommand ? undefined : await resolveToolName(client, ask, sleep);
+  if (isShellAsk(ask, tool)) {
+    return shellDecision(ask, rootDirectory);
   }
 
-  const tool = await resolveToolName(client, ask, sleep);
   if (tool === undefined) {
     return { response: "reject", reason: "could not identify the tool behind the request" };
   }
@@ -220,6 +316,18 @@ export interface PermissionResponderOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Dynamic allow-list; the root responder must not answer unrelated sessions. */
   allowedSessionIDs?: () => ReadonlySet<string>;
+  /**
+   * Base URL of a v2 server. When set, pending requests are also drained over
+   * REST, because v2 servers never surface them on the legacy event stream.
+   */
+  baseUrl?: string;
+  /** Directory scoped for the v2 pending list query. */
+  directory?: string;
+  /**
+   * Server launch root used to ground which external asks count as inside the
+   * owned tree. Falls back to `directory` when omitted.
+   */
+  rootDirectory?: string;
 }
 
 export interface PermissionResponder {
@@ -230,6 +338,29 @@ export interface PermissionResponder {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pendingItemToAsk(item: PendingPermissionItem): PermissionAsk {
+  return {
+    id: item.id,
+    sessionID: item.sessionID,
+    permission: item.action,
+    patterns: item.resources,
+    metadata: item.metadata,
+    always: item.save,
+    tool: item.source
+      ? { messageID: item.source.messageID, callID: item.source.callID }
+      : undefined,
+  };
+}
+
+/** Remember a handled id, dropping the oldest entries past the FIFO cap. */
+function rememberHandled(handled: Set<string>, id: string): void {
+  handled.add(id);
+  if (handled.size <= HANDLED_LIMIT) return;
+  const kept = Array.from(handled).slice(-HANDLED_LIMIT);
+  handled.clear();
+  for (const entry of kept) handled.add(entry);
 }
 
 /**
@@ -248,6 +379,9 @@ export function startPermissionResponder(
   const onDecision = options.onDecision ?? (() => {});
   const sleep = options.sleep ?? defaultSleep;
   const allowedSessionIDs = options.allowedSessionIDs;
+  const baseUrl = options.baseUrl;
+  const directory = options.directory;
+  const rootDirectory = options.rootDirectory ?? options.directory;
   const controller = new AbortController();
 
   let stopped = false;
@@ -256,7 +390,7 @@ export function startPermissionResponder(
     controller.abort(new Error("permission responder stopped"));
   };
 
-  const waitToReconnect = () =>
+  const waitFor = (ms: number) =>
     new Promise<void>((resolve) => {
       let settled = false;
       const finish = () => {
@@ -266,10 +400,13 @@ export function startPermissionResponder(
         resolve();
       };
       controller.signal.addEventListener("abort", finish, { once: true });
-      void sleep(RECONNECT_DELAY_MS).then(finish, finish);
+      void sleep(ms).then(finish, finish);
     });
 
-  const done = (async () => {
+  const waitToReconnect = () => waitFor(RECONNECT_DELAY_MS);
+  const waitForPoll = () => waitFor(PENDING_POLL_MS);
+
+  const sseDone = (async () => {
     while (!stopped) {
       try {
         const { stream } = await client.event.subscribe({ signal: controller.signal });
@@ -278,7 +415,10 @@ export function startPermissionResponder(
           if (!PERMISSION_EVENTS.has(event.type)) continue;
           const ask = event.properties as unknown as PermissionAsk;
           if (allowedSessionIDs && !allowedSessionIDs().has(ask.sessionID)) continue;
-          const decision = await decidePermission(client, ask, policy, sleep);
+          const decision = await decidePermission(client, ask, policy, {
+            sleep,
+            rootDirectory,
+          });
           const response = await client.postSessionIdPermissionsPermissionId({
             path: { id: ask.sessionID, permissionID: ask.id },
             body: { response: decision.response },
@@ -294,6 +434,64 @@ export function startPermissionResponder(
       await waitToReconnect();
     }
   })();
+
+  const drainDone = (async () => {
+    if (baseUrl === undefined) return;
+
+    const handled = new Set<string>();
+    while (!stopped) {
+      let failed = false;
+      try {
+        const query = directory === undefined ? "" : `?directory=${encodeURIComponent(directory)}`;
+        const listResponse = await fetch(`${baseUrl}/api/permission/request${query}`, {
+          signal: controller.signal,
+        });
+        if (!listResponse.ok) {
+          throw new Error(`permission list failed: HTTP ${listResponse.status}`);
+        }
+        const body = (await listResponse.json()) as { data?: PendingPermissionItem[] };
+
+        for (const item of body.data ?? []) {
+          if (handled.has(item.id)) continue;
+          if (allowedSessionIDs && !allowedSessionIDs().has(item.sessionID)) continue;
+
+          rememberHandled(handled, item.id);
+          const ask = pendingItemToAsk(item);
+          try {
+            const decision = await decidePermission(client, ask, policy, {
+              sleep,
+              rootDirectory,
+            });
+            const replyResponse = await fetch(
+              `${baseUrl}/api/session/${ask.sessionID}/permission/${ask.id}/reply`,
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ reply: decision.response }),
+                signal: controller.signal,
+              },
+            );
+            if (!replyResponse.ok) {
+              throw new Error(`permission reply failed: HTTP ${replyResponse.status}`);
+            }
+            onDecision(ask, decision);
+          } catch (error) {
+            if (stopped) return;
+            onError(error);
+          }
+        }
+      } catch (error) {
+        if (stopped) return;
+        onError(error);
+        failed = true;
+      }
+      if (stopped) return;
+      if (failed) await waitToReconnect();
+      else await waitForPoll();
+    }
+  })();
+
+  const done = Promise.all([sseDone, drainDone]).then(() => undefined);
 
   return { stop, done };
 }

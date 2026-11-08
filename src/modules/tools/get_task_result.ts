@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Part } from "@opencode-ai/sdk";
 import { z } from "zod";
 import { buildExecutionUsage } from "../shared/execution-usage.js";
-import { jsonError, jsonResult } from "../shared/mcp-result.js";
+import { jsonError, jsonResult, unknownTaskHint } from "../shared/mcp-result.js";
 import {
   assistantEntries,
   buildProgress,
@@ -71,7 +71,7 @@ export function registerOpencodeGetTaskResult(server: McpServer) {
       if (!resolved) {
         if (run?.result)
           return jsonResult({ ...run.result, workspace: task?.workspace, ...reportFields(run) });
-        if (!task) return jsonError({ task_id, status: "not_found" });
+        if (!task) return jsonError({ task_id, status: "not_found", message: unknownTaskHint() });
         return jsonError({
           task_id,
           status: "backend_unavailable",

@@ -11,7 +11,7 @@ import {
   validateRelativePath,
   type WorkspaceSnapshot,
 } from "../shared/execution-report.js";
-import { jsonError, jsonResult } from "../shared/mcp-result.js";
+import { jsonError, jsonResult, unknownTaskHint } from "../shared/mcp-result.js";
 import { createMessageId } from "../shared/message-id.js";
 import { clientForTask } from "../shared/opencode-client.js";
 import { sendPromptAndClassify } from "../shared/prompt-dispatch.js";
@@ -73,11 +73,12 @@ export function registerOpencodeContinueTask(server: McpServer) {
     async ({ task_id, prompt, agent, model, expected_changes, checks }) => {
       const resolved = clientForTask(task_id);
       if (!resolved) {
-        return jsonError({ task_id, status: "task_not_found" });
+        return jsonError({ task_id, status: "task_not_found", message: unknownTaskHint() });
       }
       const { client, sessionId } = resolved;
       const task = getTask(task_id);
-      if (!task) return jsonError({ task_id, status: "task_not_found" });
+      if (!task)
+        return jsonError({ task_id, status: "task_not_found", message: unknownTaskHint() });
       const previous = task?.runs?.find((run) => run.run_id === task.currentRunId);
       if (previous && !previous.reportReady)
         return jsonError({ task_id, status: "previous_run_reporting" });

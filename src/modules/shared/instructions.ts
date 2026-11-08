@@ -26,13 +26,14 @@ ${formatTierGuide()}
 Spread parallel tasks across models instead of firing every task at the same scarce one. models.providers[] is also the authority on what is actually enabled for the connected account.
 
 Workflow:
-1. Ensure an OpenCode server is running. If you don't already have a server_id from a previous opencode_start_server call, call opencode_start_server first.
+1. Ensure an OpenCode server is running. If you don't already have a server_id from a previous opencode_start_server call, call opencode_start_server first. Its response reports the launch directory (read it before choosing relative paths) and auto-tries the next port if the default is taken.
 2. Call opencode_list_agents with the server_id to discover the available agents (native and custom), the exact model ids and their quotas. Pass its optional directory when the task targets a different project so discovery matches task configuration. Agents may have a pre-assigned model ("provider/model"); you can still override it per task.
-3. For each task, call opencode_start_task with the server_id and the task's prompt, optionally with an agent/model override, a directory relative to the server directory, and workspace_mode='shared'|'worktree'. Shared mode is the backward-compatible default. Worktree mode uses a detached committed base_ref (default HEAD), does not copy source changes, and returns workspace metadata including workspace_id.
+3. For each task, call opencode_start_task with the server_id and the task's prompt, optionally with an agent/model override, a directory relative to the server directory, and workspace_mode='shared'|'worktree'. Shared mode is the backward-compatible default. Worktree mode uses a detached committed base_ref (default HEAD), does not copy source changes, and returns workspace metadata including workspace_id. The optional directory resolves against the server launch directory (the 'directory' field of opencode_start_server's response), NOT against your own working directory; check 'workspace.source_directory' in the response to confirm where the task will actually run, and create the folder before dispatch if it does not exist yet.
 4. Wait for completion with opencode_wait_for_task:
    - Single task: mode "all" with the single task_id.
    - Multiple tasks, incremental results: call it repeatedly with mode "any", removing completed task_ids each time.
    - Multiple tasks, all at once: call it once with mode "all" and every task_id.
+   Each call is clamped so its answer always reaches you (default 55000 ms; MCP_TOOL_TIMEOUT overrides). When it returns with timed_out: true while a task is still running, call it again with the same task_ids; loop until every task reports a terminal status. Terminal failures include an error field with the diagnosis.
 5. Once a task is reported finished, call opencode_get_task_result for that task_id to retrieve its output.
 6. Use opencode_get_task_status only for quick, non-blocking checks on a task's progress (e.g. to report status to the user) — it does not replace opencode_wait_for_task or opencode_get_task_result.
 

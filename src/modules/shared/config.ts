@@ -1,11 +1,20 @@
-const DEFAULT_MAX_TIMEOUT_MS = 300_000;
+/**
+ * Default cap low enough that a `wait_for_task` long-poll always returns its
+ * graceful `timed_out` payload to callers whose MCP client aborts long-running
+ * tool requests before the tool can answer (observed with OpenCode hosts and
+ * the official MCP Inspector clients; responses arrived late with
+ * `MCP error -32001: Request timed out` at 100s+, so 55s leaves headroom).
+ * Raise it via `MCP_TOOL_TIMEOUT` only when the calling host demonstrably
+ * tolerates longer tool requests.
+ */
+const DEFAULT_MAX_TIMEOUT_MS = 55_000;
 
 /**
  * Resolve the configurable max clamp (ms) for tool wait timeouts.
  *
  * Precedence: the `MCP_TOOL_TIMEOUT` environment variable wins over an
  * `MCP_TOOL_TIMEOUT=<ms>` CLI arg, which wins over the built-in default of
- * 300000ms (5 min). Invalid/non-numeric values fall back to the default.
+ * 55000ms. Invalid/non-numeric values fall back to the default.
  *
  * Reads `process.env` / `process.argv` lazily on each call so tests can vary
  * them between invocations without module re-import tricks.

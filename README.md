@@ -151,7 +151,9 @@ Restart your MCP host after editing the config; the `opencode_*` tools should ap
 
 ### `MCP_TOOL_TIMEOUT`
 
-`opencode_wait_for_task` accepts a `timeout_ms` input, but it's clamped to a server-side maximum so a single call can't block the MCP connection indefinitely. That maximum defaults to **300000 ms (5 minutes)** and is configurable via `MCP_TOOL_TIMEOUT`.
+`opencode_wait_for_task` accepts a `timeout_ms` input, but it's clamped to a server-side maximum so a single call stays inside the calling host's own MCP request timeout. That maximum defaults to **55000 ms** and is configurable via `MCP_TOOL_TIMEOUT`.
+
+The default is deliberately low: MCP hosts abort long tool requests with `MCP error -32001: Request timed out` before the tool can answer (observed on OpenCode hosts and the MCP Inspector at 100s+), so a graceful `timed_out: true` payload at 55s always beats a dead transport. Loop the wait — call `opencode_wait_for_task` again while `timed_out` is `true` — instead of raising `timeout_ms`. Raise this only when your host demonstrably tolerates longer tool requests.
 
 `MCP_TOOL_TIMEOUT` can be set two ways:
 
@@ -185,7 +187,7 @@ Restart your MCP host after editing the config; the `opencode_*` tools should ap
   }
   ```
 
-If both are present, the **environment variable takes precedence** over the CLI argument. Invalid or non-numeric values fall back to the 300000 ms default.
+If both are present, the **environment variable takes precedence** over the CLI argument. Invalid or non-numeric values fall back to the 55000 ms default.
 
 ### Permissions and trust
 

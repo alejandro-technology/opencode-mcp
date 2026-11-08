@@ -20,7 +20,12 @@ export function registerOpencodeStopServer(server: McpServer) {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ server_id, status: "not_found" }),
+              text: JSON.stringify({
+                server_id,
+                status: "not_found",
+                message:
+                  "server_id is not registered in this MCP process; only ids returned by opencode_start_server can be stopped here",
+              }),
             },
           ],
         };

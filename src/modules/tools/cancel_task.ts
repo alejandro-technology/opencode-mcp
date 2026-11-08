@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { jsonError, jsonResult } from "../shared/mcp-result.js";
+import { jsonError, jsonResult, unknownTaskHint } from "../shared/mcp-result.js";
 import { clientForTask } from "../shared/opencode-client.js";
 import { finishConfirmedCancellation } from "../shared/run-observer.js";
 import {
@@ -21,7 +21,7 @@ export function registerOpencodeCancelTask(server: McpServer) {
     async ({ task_id }) => {
       const resolved = clientForTask(task_id);
       if (!resolved) {
-        return jsonError({ task_id, status: "task_not_found" });
+        return jsonError({ task_id, status: "task_not_found", message: unknownTaskHint() });
       }
       const { client, sessionId } = resolved;
 

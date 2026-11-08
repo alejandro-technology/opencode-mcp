@@ -100,7 +100,12 @@ export function registerOpencodeListAgents(server: McpServer) {
     async ({ server_id, directory }) => {
       const instance = getServer(server_id);
       if (!instance) {
-        return jsonError({ server_id, status: "not_found" });
+        return jsonError({
+          server_id,
+          status: "not_found",
+          message:
+            "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
+        });
       }
 
       try {
@@ -110,17 +115,33 @@ export function registerOpencodeListAgents(server: McpServer) {
             resolve(instance.directory ?? process.cwd(), directory ?? "."),
           );
           if (!(await stat(projectDirectory)).isDirectory()) {
-            return jsonError({ server_id, status: "invalid_directory", directory });
+            return jsonError({
+              server_id,
+              status: "invalid_directory",
+              directory,
+              message: `directory is not a folder; paths resolve against the server launch directory (${instance.directory})`,
+            });
           }
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code === "ENOENT" || code === "ENOTDIR") {
-            return jsonError({ server_id, status: "invalid_directory", directory });
+            return jsonError({
+              server_id,
+              status: "invalid_directory",
+              directory,
+              message: `directory does not exist; paths resolve against the server launch directory (${instance.directory})`,
+            });
           }
           throw error;
         }
         const client = clientForServer(server_id, projectDirectory);
-        if (!client) return jsonError({ server_id, status: "not_found" });
+        if (!client)
+          return jsonError({
+            server_id,
+            status: "not_found",
+            message:
+              "server_id is not registered in this MCP process; call opencode_start_server and use the server_id it returned",
+          });
         // getUsageLimits() reads a once-a-day snapshot from disk, so this adds
         // no network round-trip on a warm cache and never throws.
         const [agentsResult, providersResult, limits] = await Promise.all([

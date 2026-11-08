@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }));
 vi.mock("@opencode-ai/sdk", () => ({
@@ -6,6 +6,7 @@ vi.mock("@opencode-ai/sdk", () => ({
 }));
 
 const {
+  CHILD_POLL_MS,
   registerPermissionSession,
   stopPermissionScope,
   stopPermissionScopesForServer,
@@ -15,13 +16,58 @@ const { registerServer, removeServer } = await import(
   "../../../src/modules/shared/server-registry.js"
 );
 
+const fetchMock = vi.fn(async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ data: [] }),
+}));
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", fetchMock);
+});
+
 afterEach(() => {
   stopPermissionScopesForServer("scope-server");
   stopPermissionScopesForServer("other-server");
   removeServer("scope-server");
   removeServer("scope-server-extra");
   clientFactory.mockReset();
+  fetchMock.mockReset();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
+
+/** A stubbed client's `session.children` that reports no children by default. */
+function noChildren() {
+  return vi.fn(async () => ({ data: [] }));
+}
+
+function controllableStream() {
+  const queue: unknown[] = [];
+  let resolveNext: ((event: unknown) => void) | undefined;
+  return {
+    push(event: unknown) {
+      if (resolveNext) {
+        const resolve = resolveNext;
+        resolveNext = undefined;
+        resolve(event);
+        return;
+      }
+      queue.push(event);
+    },
+    stream: (async function* () {
+      for (;;) {
+        if (queue.length > 0) {
+          yield queue.shift();
+          continue;
+        }
+        yield await new Promise<unknown>((resolve) => {
+          resolveNext = resolve;
+        });
+      }
+    })(),
+  };
+}
 
 describe("directory-scoped permission responders", () => {
   it("uses one directory-bound responder per scope and answers only its owned sessions", async () => {
@@ -44,6 +90,7 @@ describe("directory-scoped permission responders", () => {
     }));
     clientFactory.mockReturnValue({
       event: { subscribe },
+      session: { children: noChildren() },
       postSessionIdPermissionsPermissionId: vi.fn(async (request) => {
         replies.push(request);
         return {};
@@ -88,6 +135,7 @@ describe("directory-scoped permission responders", () => {
     });
     clientFactory.mockReturnValue({
       event: { subscribe },
+      session: { children: noChildren() },
       postSessionIdPermissionsPermissionId: vi.fn(),
     });
     registerServer({
@@ -105,6 +153,17 @@ describe("directory-scoped permission responders", () => {
 
   it("does not start responders for unscoped test or legacy server entries", () => {
     registerServer({ serverId: "scope-server", baseUrl: "http://127.0.0.1:4096", close: () => {} });
+    registerPermissionSession("scope-server", "/workspace", "session-1");
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  it("does not start responders when permission scopes are disabled", () => {
+    registerServer({
+      serverId: "scope-server",
+      baseUrl: "http://127.0.0.1:4096",
+      permissionScopesEnabled: false,
+      close: () => {},
+    });
     registerPermissionSession("scope-server", "/workspace", "session-1");
     expect(clientFactory).not.toHaveBeenCalled();
   });
@@ -128,6 +187,7 @@ describe("directory-scoped permission responders", () => {
               });
         }),
       },
+      session: { children: noChildren() },
       postSessionIdPermissionsPermissionId: vi.fn(),
     }));
     registerServer({
@@ -155,5 +215,126 @@ describe("directory-scoped permission responders", () => {
     expect(signals.get("/error")?.aborted).toBe(false);
     unregisterPermissionSession("scope-server-extra", "/error", "error-session");
     log.mockRestore();
+  });
+});
+
+describe("subagent child session acceptance", () => {
+  it("admits child sessions discovered by the poller", async () => {
+    vi.useFakeTimers();
+    const replies: unknown[] = [];
+    const stream = controllableStream();
+    const children = vi.fn(async ({ path }: { path: { id: string } }) =>
+      path.id === "parent-1" ? { data: [{ id: "child-1" }] } : { data: [] },
+    );
+    clientFactory.mockReturnValue({
+      event: { subscribe: vi.fn(async () => ({ stream: stream.stream })) },
+      session: { children },
+      postSessionIdPermissionsPermissionId: vi.fn(async (request) => {
+        replies.push(request);
+        return {};
+      }),
+    });
+    registerServer({
+      serverId: "scope-server",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: "/repo",
+      permissionPolicy: "allow",
+      permissionScopesEnabled: true,
+      close: () => {},
+    });
+
+    registerPermissionSession("scope-server", "/worktree/one", "parent-1");
+    await vi.advanceTimersByTimeAsync(CHILD_POLL_MS);
+    expect(children).toHaveBeenCalledWith({ path: { id: "parent-1" } });
+
+    stream.push({
+      type: "permission.asked",
+      properties: { id: "child-ask", sessionID: "child-1", permission: "bash" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(replies).toEqual([
+      { path: { id: "child-1", permissionID: "child-ask" }, body: { response: "always" } },
+    ]);
+  });
+
+  it("logs one failure per call and keeps polling after thrown or non-ok lookups", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const replies: unknown[] = [];
+    const stream = controllableStream();
+    const children = vi.fn(async ({ path }: { path: { id: string } }) => {
+      if (path.id === "parent-throw") throw new Error("children failed");
+      if (path.id === "parent-error") return { error: new Error("HTTP 500") };
+      if (path.id === "parent-empty") return {};
+      return { data: [{ id: "child-ok" }] };
+    });
+    clientFactory.mockReturnValue({
+      event: { subscribe: vi.fn(async () => ({ stream: stream.stream })) },
+      session: { children },
+      postSessionIdPermissionsPermissionId: vi.fn(async (request) => {
+        replies.push(request);
+        return {};
+      }),
+    });
+    registerServer({
+      serverId: "scope-server",
+      baseUrl: "http://127.0.0.1:4096",
+      directory: "/repo",
+      permissionPolicy: "allow",
+      permissionScopesEnabled: true,
+      close: () => {},
+    });
+
+    registerPermissionSession("scope-server", "/worktree/one", "parent-throw");
+    registerPermissionSession("scope-server", "/worktree/one", "parent-error");
+    registerPermissionSession("scope-server", "/worktree/one", "parent-empty");
+    registerPermissionSession("scope-server", "/worktree/one", "parent-ok");
+
+    await vi.advanceTimersByTimeAsync(CHILD_POLL_MS);
+    expect(
+      log.mock.calls.filter(([message]) => message === "OpenCode child session poll error:"),
+    ).toHaveLength(2);
+
+    stream.push({
+      type: "permission.asked",
+      properties: { id: "child-ask", sessionID: "child-ok", permission: "bash" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(replies).toEqual([
+      { path: { id: "child-ok", permissionID: "child-ask" }, body: { response: "always" } },
+    ]);
+
+    const callsAfterFirstPoll = children.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(CHILD_POLL_MS);
+    expect(children.mock.calls.length).toBeGreaterThan(callsAfterFirstPoll);
+
+    log.mockRestore();
+  });
+
+  it("stops polling when the last session is unregistered", async () => {
+    vi.useFakeTimers();
+    const children = vi.fn(async ({ path }: { path: { id: string } }) =>
+      path.id === "parent-1" ? { data: [{ id: "child-1" }] } : { data: [] },
+    );
+    clientFactory.mockReturnValue({
+      event: { subscribe: vi.fn(() => new Promise<never>(() => {})) },
+      session: { children },
+      postSessionIdPermissionsPermissionId: vi.fn(),
+    });
+    registerServer({
+      serverId: "scope-server",
+      baseUrl: "http://127.0.0.1:4096",
+      permissionScopesEnabled: true,
+      close: () => {},
+    });
+
+    registerPermissionSession("scope-server", "/workspace", "parent-1");
+    await vi.advanceTimersByTimeAsync(CHILD_POLL_MS);
+    expect(children).toHaveBeenCalledTimes(1);
+
+    unregisterPermissionSession("scope-server", "/workspace", "parent-1");
+    await vi.advanceTimersByTimeAsync(CHILD_POLL_MS * 3);
+    expect(children).toHaveBeenCalledTimes(1);
   });
 });
