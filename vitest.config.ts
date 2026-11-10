@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
+    env: { OPENCODE_MCP_HISTORY_DB: ":memory:" },
     include: ["tests/**/*.test.ts"],
     exclude: ["**/node_modules/**", "**/build/**", "**/coverage/**"],
     coverage: {
