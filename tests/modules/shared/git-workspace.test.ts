@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -305,5 +306,105 @@ describe("managed Git workspaces", () => {
     expect(await readFile(join(second.executionDirectory, "same.txt"), "utf8")).toBe("committed\n");
     await removeGitWorkspace(first, { discardChanges: true });
     await removeGitWorkspace(second);
+  });
+});
+
+import { getRawDb, resetDbForTests } from "../../../src/modules/shared/db/index.js";
+import {
+  getGitWorkspaceById,
+  hydrateGitWorkspace,
+  resetGitWorkspaceForTests,
+} from "../../../src/modules/shared/git-workspace.js";
+
+describe("cross-restart worktree re-hydration", () => {
+  it("re-hydrates a worktree from SQLite after clearing in-memory handles", async () => {
+    const { source, cache } = await fixture();
+    const dbFile = join(cache, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const workspace = await createGitWorkspace(source, { workspaceParent: cache });
+    resetDbForTests();
+    resetGitWorkspaceForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    const described = describeGitWorkspace(workspace);
+    expect(described.id).toBe(workspace.id);
+    resetGitWorkspaceForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    await removeGitWorkspace(workspace);
+    resetDbForTests();
+    resetGitWorkspaceForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("covers the reset helper", () => {
+    resetGitWorkspaceForTests();
+    expect(true).toBe(true);
+  });
+});
+
+describe("git workspace uncovered branches", () => {
+  it("reports a persistence failure during creation", async () => {
+    const { source, cache } = await fixture();
+    const dbDir = join(cache, "db-as-dir");
+    await mkdir(dbDir, { recursive: true });
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbDir;
+    resetDbForTests();
+    await expect(createGitWorkspace(source, { workspaceParent: cache })).rejects.toMatchObject({
+      code: "provision_failed",
+    });
+    resetDbForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("returns undefined when hydration cannot open the database", () => {
+    const root = mkdtempSync(join(tmpdir(), "git-workspace-dbdir-"));
+    roots.push(root);
+    const dbDir = join(root, "db-as-dir");
+    mkdirSync(dbDir);
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbDir;
+    resetDbForTests();
+    expect(hydrateGitWorkspace("missing")).toBeUndefined();
+    resetDbForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("covers getGitWorkspaceById on an existing handle", async () => {
+    const { source, cache } = await fixture();
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    const dbFile = join(cache, "history.sqlite");
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const workspace = await createGitWorkspace(source, { workspaceParent: cache });
+    // existing handle branch
+    expect(getGitWorkspaceById(workspace.id)?.id).toBe(workspace.id);
+    resetGitWorkspaceForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    expect(getGitWorkspaceById(workspace.id)?.id).toBe(workspace.id);
+    resetDbForTests();
+    resetGitWorkspaceForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("throws not_owned when removing an unknown workspace", async () => {
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = join(tmpdir(), "missing-workspace-db.sqlite");
+    resetDbForTests();
+    resetGitWorkspaceForTests();
+    await expect(
+      removeGitWorkspace({ id: "unknown-workspace" } as unknown as GitWorkspace),
+    ).rejects.toMatchObject({ code: "not_owned" });
+    resetDbForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
   });
 });

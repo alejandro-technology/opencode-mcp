@@ -4,6 +4,9 @@ import { mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { eq } from "drizzle-orm";
+import { getDb, getInstanceId, getRawDb, withImmediateTx } from "./db/index.js";
+import * as schema from "./db/schema.js";
 
 const execFileAsync = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 10_000;
@@ -24,6 +27,7 @@ export type GitWorkspace = {
 
 export type CreateGitWorkspaceOptions = {
   baseRef?: string;
+  serverId?: string;
   /** Internal test seam; production callers should use the managed cache parent. */
   workspaceParent?: string;
   /** Internal command boundary for deterministic failure-path tests. */
@@ -183,6 +187,32 @@ export async function createGitWorkspace(
       managed: true,
     };
     handles.set(id, { workspace, runGit: command });
+    try {
+      withImmediateTx(() => {
+        getRawDb()
+          .prepare(
+            "INSERT INTO workspaces (workspace_id, server_id, source_directory, repository_directory, worktree_directory, execution_directory, base_commit, source_dirty, state, owner_instance_id, created_at, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL) ON CONFLICT(workspace_id) DO UPDATE SET server_id=excluded.server_id, source_directory=excluded.source_directory, repository_directory=excluded.repository_directory, worktree_directory=excluded.worktree_directory, execution_directory=excluded.execution_directory, base_commit=excluded.base_commit, source_dirty=excluded.source_dirty, state='active', owner_instance_id=excluded.owner_instance_id, created_at=excluded.created_at, removed_at=NULL",
+          )
+          .run(
+            workspace.id,
+            options.serverId ?? "",
+            workspace.sourceDirectory,
+            workspace.repositoryDirectory,
+            workspace.worktreeDirectory,
+            workspace.executionDirectory,
+            workspace.baseCommit,
+            workspace.sourceDirty ? 1 : 0,
+            getInstanceId(),
+            Date.now(),
+          );
+      });
+    } catch (error) {
+      handles.delete(id);
+      throw new GitWorkspaceError(
+        "provision_failed",
+        `Unable to persist managed workspace: ${String(error)}`,
+      );
+    }
     return workspace;
   } catch (error) {
     // Leave any partial worktree for explicit inspection; never force-clean unknown state.
@@ -193,9 +223,49 @@ export async function createGitWorkspace(
   }
 }
 
+export function hydrateGitWorkspace(id: string): GitWorkspace | undefined {
+  let row: (typeof schema.workspaces)["$inferSelect"] | undefined;
+  try {
+    row = getDb()
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.workspaceId, id))
+      .all()[0];
+  } catch {
+    return undefined;
+  }
+  if (!row || row.state === "removed") return undefined;
+  const workspace: GitWorkspace = {
+    id: row.workspaceId,
+    sourceDirectory: row.sourceDirectory,
+    repositoryDirectory: row.repositoryDirectory,
+    worktreeDirectory: row.worktreeDirectory,
+    executionDirectory: row.executionDirectory,
+    baseCommit: row.baseCommit,
+    sourceDirty: row.sourceDirty,
+    managed: true,
+  };
+  handles.set(id, { workspace, runGit: gitRunner("git") });
+  return { ...workspace };
+}
+
+export function getGitWorkspaceById(id: string): GitWorkspace | undefined {
+  const existing = handles.get(id);
+  if (existing) return { ...existing.workspace };
+  return hydrateGitWorkspace(id);
+}
+
 export function describeGitWorkspace(handle: GitWorkspace): GitWorkspace {
-  const record = handles.get(handle.id);
-  if (!record || record.workspace !== handle) {
+  const hadRecord = handles.has(handle.id);
+  let record = handles.get(handle.id);
+  if (!record) {
+    hydrateGitWorkspace(handle.id);
+    record = handles.get(handle.id);
+  }
+  if (!record) {
+    throw new GitWorkspaceError("not_owned", "Workspace handle is not owned by this process");
+  }
+  if (hadRecord && record.workspace !== handle) {
     throw new GitWorkspaceError("not_owned", "Workspace handle is not owned by this process");
   }
   return { ...record.workspace };
@@ -205,8 +275,16 @@ export async function removeGitWorkspace(
   handle: GitWorkspace,
   options: RemoveGitWorkspaceOptions = {},
 ): Promise<{ status: "removed" }> {
-  const record = handles.get(handle.id);
-  if (!record || record.workspace !== handle) {
+  const hadRecord = handles.has(handle.id);
+  let record = handles.get(handle.id);
+  if (!record) {
+    hydrateGitWorkspace(handle.id);
+    record = handles.get(handle.id);
+  }
+  if (!record) {
+    throw new GitWorkspaceError("not_owned", "Workspace handle is not owned by this process");
+  }
+  if (hadRecord && record.workspace !== handle) {
     throw new GitWorkspaceError("not_owned", "Workspace handle is not owned by this process");
   }
   const owned = record.workspace;
@@ -257,8 +335,26 @@ export async function removeGitWorkspace(
       owned.worktreeDirectory,
     ]);
     handles.delete(owned.id);
+    try {
+      withImmediateTx(() => {
+        getRawDb()
+          .prepare("UPDATE workspaces SET state='removed', removed_at=? WHERE workspace_id=?")
+          .run(Date.now(), owned.id);
+      });
+    } catch {
+      // Best-effort durable update; git removal already succeeded.
+    }
     return { status: "removed" };
   } catch (error) {
+    try {
+      withImmediateTx(() => {
+        getRawDb()
+          .prepare("UPDATE workspaces SET state='active' WHERE workspace_id=?")
+          .run(owned.id);
+      });
+    } catch {
+      // Best-effort reset.
+    }
     if (error instanceof GitWorkspaceError) throw error;
     throw new GitWorkspaceError(
       "remove_failed",
@@ -266,3 +362,9 @@ export async function removeGitWorkspace(
     );
   }
 }
+
+export function resetGitWorkspaceForTests(): void {
+  handles.clear();
+}
+
+export const resetGitWorkspacesForTests = resetGitWorkspaceForTests;

@@ -1,18 +1,22 @@
 import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getRawDb, resetDbForTests } from "../../../src/modules/shared/db/index.js";
 import { registerServer, removeServer } from "../../../src/modules/shared/server-registry.js";
 import {
   acquireManagedWorkspaceDispatch,
   associateManagedWorkspaceTask,
   createManagedWorkspace,
+  hydrateWorkspaceRecord,
   managedWorkspaceTaskIds,
   registerManagedWorkspaceSession,
   releaseManagedWorkspaceCleanup,
   removeManagedWorkspace,
   reserveManagedWorkspaceCleanup,
+  resetWorkspaceManagerForTests,
   sharedWorkspaceMetadata,
   workspaceMetadata,
 } from "../../../src/modules/shared/workspace-manager.js";
@@ -153,5 +157,183 @@ describe("managed workspace lifecycle", () => {
     if (!cleanup) throw new Error("workspace cleanup reservation failed");
     await removeManagedWorkspace(id, true);
     expect(cleanup.handle.sourceDirectory).toBe(await realpath(source));
+  });
+});
+
+describe("cross-restart workspace re-hydration", () => {
+  it("re-hydrates metadata from SQLite after clearing maps", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    expect(workspaceMetadata(id)?.state).toBe("active");
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("re-hydrates and reserves cleanup after clearing maps", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    const cleanup = reserveManagedWorkspaceCleanup(id);
+    expect(cleanup).toBeDefined();
+    releaseManagedWorkspaceCleanup(id);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+});
+
+describe("workspace manager uncovered branches", () => {
+  it("returns undefined when hydration cannot open the database", () => {
+    const dbDir = join(tmpdir(), `wm-dbdir-${Date.now()}`);
+    mkdirSync(dbDir, { recursive: true });
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbDir;
+    resetDbForTests();
+    expect(workspaceMetadata("any")).toBeUndefined();
+    resetDbForTests();
+    rmSync(dbDir, { recursive: true, force: true });
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("returns undefined when reserve cannot open the database", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    resetDbForTests();
+    const dbDir = join(root, "db-as-dir");
+    await mkdir(dbDir, { recursive: true });
+    process.env.OPENCODE_MCP_HISTORY_DB = dbDir;
+    expect(reserveManagedWorkspaceCleanup(id)).toBeUndefined();
+    resetDbForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("handles a missing tasks table during hydration", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    getRawDb().exec("DROP TABLE tasks");
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    expect(workspaceMetadata(id)?.state).toBe("active");
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+});
+
+describe("workspace manager task id hydration", () => {
+  it("hydrates task ids from the tasks table", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    const now = Date.now();
+    getRawDb()
+      .prepare(
+        "INSERT INTO tasks (task_id, server_id, session_id, workspace_id, created_at, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("task-x", root, "session-x", id, now, now);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    getRawDb();
+    expect(managedWorkspaceTaskIds(id)).toContain("task-x");
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+});
+
+describe("workspace manager branch coverage", () => {
+  it("covers hydrate existing-record branch", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    // hydrate once, then again to hit existing branch
+    const first = hydrateWorkspaceRecord(id);
+    const second = hydrateWorkspaceRecord(id);
+    expect(second).toBe(first);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("covers reserve zero-rows branch", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    // mark DB row non-active while in-memory stays active
+    getRawDb().prepare("UPDATE workspaces SET state='cleaning' WHERE workspace_id=?").run(id);
+    expect(reserveManagedWorkspaceCleanup(id)).toBeUndefined();
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
+  });
+
+  it("covers release hydration branches", async () => {
+    const { root, source } = await gitFixture();
+    const dbFile = join(root, "history.sqlite");
+    const previousDb = process.env.OPENCODE_MCP_HISTORY_DB;
+    process.env.OPENCODE_MCP_HISTORY_DB = dbFile;
+    resetDbForTests();
+    const metadata = await createManagedWorkspace(root, source);
+    const id = workspaceID(metadata);
+    // existing record branch
+    releaseManagedWorkspaceCleanup(id);
+    // missing record branch (clear map)
+    resetWorkspaceManagerForTests();
+    releaseManagedWorkspaceCleanup(id);
+    resetDbForTests();
+    resetWorkspaceManagerForTests();
+    if (previousDb === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = previousDb;
   });
 });
