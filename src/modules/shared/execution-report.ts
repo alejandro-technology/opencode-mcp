@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
-import { getRawDb } from "./db/index.js";
+import { getInstanceId, getRawDb, isInstanceAlive, withImmediateTx } from "./db/index.js";
 
 export type ExpectedChange = { path: string; change: "created" | "modified" | "deleted" };
 export type VerificationCheck = {
@@ -472,23 +472,126 @@ export function deleteWorkspaceBaseline(runId: string): void {
   getRawDb().prepare("DELETE FROM workspace_baselines WHERE run_id = ?").run(runId);
 }
 
-const reservations: Array<{ root: string; exclusive: boolean; token: symbol }> = [];
+type WorkspaceLeaseRow = {
+  lease_id: string;
+  workspace_root: string;
+  exclusive: number;
+  run_id: string | null;
+  owner_instance_id: string;
+};
+
+const reservations: Array<{ root: string; exclusive: boolean; token: symbol; leaseId: string }> =
+  [];
+
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
+}
+
+function runAwaitsRecovery(runId: string | null): boolean {
+  if (runId === null) return false;
+  const row = getRawDb()
+    .prepare("SELECT dispatch_state FROM task_runs WHERE run_id = ?")
+    .get(runId) as { dispatch_state: string } | undefined;
+  return row?.dispatch_state === "uncertain";
+}
+
+function leaseIsLive(row: WorkspaceLeaseRow): boolean {
+  return isInstanceAlive(row.owner_instance_id) || runAwaitsRecovery(row.run_id);
+}
+
 export async function reserveWorkspace(
   directory: string,
   exclusive: boolean,
+  runId?: string,
 ): Promise<symbol | undefined> {
   const root = await realpath(directory);
-  const overlap = (a: string, b: string) =>
-    a === b || a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
-  if (reservations.some((item) => overlap(root, item.root) && (exclusive || item.exclusive)))
+  if (reservations.some((item) => pathsOverlap(root, item.root) && (exclusive || item.exclusive)))
     return undefined;
+
+  const leaseId = globalThis.crypto.randomUUID();
+  const acquired = withImmediateTx(() => {
+    const rows = getRawDb()
+      .prepare(
+        "SELECT lease_id, workspace_root, exclusive, run_id, owner_instance_id FROM workspace_leases",
+      )
+      .all() as WorkspaceLeaseRow[];
+    for (const row of rows) {
+      if (!pathsOverlap(root, row.workspace_root)) continue;
+      if (!exclusive && row.exclusive === 0) continue;
+      if (leaseIsLive(row)) return false;
+      getRawDb().prepare("DELETE FROM workspace_leases WHERE lease_id = ?").run(row.lease_id);
+    }
+    getRawDb()
+      .prepare(
+        "INSERT INTO workspace_leases (lease_id, workspace_root, exclusive, run_id, owner_instance_id, owner_pid, acquired_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        leaseId,
+        root,
+        exclusive ? 1 : 0,
+        runId ?? null,
+        getInstanceId(),
+        process.pid,
+        Date.now(),
+      );
+    return true;
+  });
+  if (!acquired) return undefined;
+
   const token = Symbol(root);
-  reservations.push({ root, exclusive, token });
+  reservations.push({ root, exclusive, token, leaseId });
   return token;
 }
+
 export function releaseWorkspace(token: symbol): void {
   const index = reservations.findIndex((item) => item.token === token);
-  if (index >= 0) reservations.splice(index, 1);
+  if (index < 0) return;
+  const [entry] = reservations.splice(index, 1);
+  withImmediateTx(() => {
+    getRawDb().prepare("DELETE FROM workspace_leases WHERE lease_id = ?").run(entry.leaseId);
+  });
+}
+
+const ACTIVE_EXECUTION_STATES = new Set(["pending", "running"]);
+
+type PrunableRunRow = {
+  run_id: string;
+  dispatch_state: string;
+  execution_state: string | null;
+  report_ready: number;
+  finalized_at: number | null;
+  workspace_id: string | null;
+};
+
+function workspaceRetained(workspaceId: string | null): boolean {
+  if (workspaceId === null) return false;
+  const row = getRawDb()
+    .prepare("SELECT state FROM workspaces WHERE workspace_id = ?")
+    .get(workspaceId) as { state: string } | undefined;
+  return row !== undefined && row.state !== "removed";
+}
+
+export function pruneTerminalTaskRuns(ttlMs: number): number {
+  const cutoff = Date.now() - ttlMs;
+  return withImmediateTx(() => {
+    const rows = getRawDb()
+      .prepare(
+        "SELECT r.run_id, r.dispatch_state, r.execution_state, r.report_ready, r.finalized_at, t.workspace_id FROM task_runs r JOIN tasks t ON t.task_id = r.task_id",
+      )
+      .all() as PrunableRunRow[];
+    const prunable = rows.filter(
+      (row) =>
+        row.finalized_at !== null &&
+        row.finalized_at < cutoff &&
+        row.dispatch_state !== "uncertain" &&
+        row.report_ready === 1 &&
+        !ACTIVE_EXECUTION_STATES.has(row.execution_state ?? "") &&
+        !workspaceRetained(row.workspace_id),
+    );
+    const statement = getRawDb().prepare("DELETE FROM task_runs WHERE run_id = ?");
+    for (const row of prunable) statement.run(row.run_id);
+    return prunable.length;
+  });
 }
 
 export async function captureReport(
