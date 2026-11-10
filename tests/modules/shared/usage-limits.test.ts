@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDb, getRawDb, resetDbForTests } from "../../../src/modules/shared/db/index.js";
+import { quotaSnapshots } from "../../../src/modules/shared/db/schema.js";
 import {
   formatTierGuide,
   formatUsageLimits,
@@ -205,15 +207,24 @@ describe("parseUsageLimits", () => {
 });
 
 describe("getUsageLimits", () => {
+  const originalDbEnv = process.env.OPENCODE_MCP_HISTORY_DB;
   let cacheDir: string;
+  let dbRoot: string;
 
   beforeEach(() => {
     cacheDir = mkdtempSync(join(tmpdir(), "opencode-mcp-cache-"));
+    dbRoot = mkdtempSync(join(tmpdir(), "opencode-mcp-usage-db-"));
+    resetDbForTests();
     process.env.OPENCODE_MCP_CACHE_DIR = cacheDir;
+    process.env.OPENCODE_MCP_HISTORY_DB = join(dbRoot, "history.sqlite");
   });
 
   afterEach(() => {
+    resetDbForTests();
+    if (originalDbEnv === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+    else process.env.OPENCODE_MCP_HISTORY_DB = originalDbEnv;
     rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(dbRoot, { recursive: true, force: true });
     delete process.env.OPENCODE_MCP_CACHE_DIR;
     delete process.env.OPENCODE_MCP_LIMITS_TTL_MS;
     vi.unstubAllGlobals();
@@ -222,6 +233,19 @@ describe("getUsageLimits", () => {
   function seedCache(limits: UsageLimits | string): void {
     const body = typeof limits === "string" ? limits : JSON.stringify(limits);
     writeFileSync(join(cacheDir, "usage-limits.json"), body, "utf8");
+  }
+
+  function seedDb(limits: UsageLimits): void {
+    getDb()
+      .insert(quotaSnapshots)
+      .values({
+        id: "opencode-go",
+        source: limits.source,
+        fetchedAt: limits.fetchedAt,
+        spendBudget: limits.spendBudget,
+        models: limits.models,
+      })
+      .run();
   }
 
   it("fetches, parses and persists the snapshot when no cache exists", async () => {
@@ -314,7 +338,154 @@ describe("getUsageLimits", () => {
 
     expect((await getUsageLimits())?.models).toHaveLength(4);
   });
+
+  it("persists a fetched snapshot into quota_snapshots", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(htmlResponse(DOCS_HTML)));
+
+    await getUsageLimits();
+
+    const row = getRawDb()
+      .prepare("SELECT * FROM quota_snapshots WHERE id = ?")
+      .get("opencode-go") as { source: string; spend_budget: string; models: string };
+
+    expect(row.source).toBe(USAGE_LIMITS_SOURCE_URL);
+    expect(JSON.parse(row.spend_budget)).toEqual({
+      fiveHours: "$12",
+      weekly: "$30",
+      monthly: "$60",
+    });
+    expect(JSON.parse(row.models)).toHaveLength(4);
+  });
+
+  it("upserts the quota snapshot instead of duplicating it on refresh", async () => {
+    process.env.OPENCODE_MCP_LIMITS_TTL_MS = "0";
+    const fetchMock = vi.fn().mockResolvedValue(htmlResponse(DOCS_HTML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getUsageLimits();
+    await getUsageLimits();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(getRawDb().prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toEqual({
+      count: 1,
+    });
+  });
+
+  it("serves the DB snapshot after the file cache is cleared", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(htmlResponse(DOCS_HTML)));
+    await getUsageLimits();
+    rmSync(join(cacheDir, "usage-limits.json"));
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const limits = await getUsageLimits();
+
+    expect(limits?.models).toHaveLength(4);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("serves the DB snapshot across a reset and reopen", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(htmlResponse(DOCS_HTML)));
+    await getUsageLimits();
+    resetDbForTests();
+    rmSync(join(cacheDir, "usage-limits.json"));
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const limits = await getUsageLimits();
+
+    expect(limits?.models).toHaveLength(4);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("prefers the DB snapshot when it is at least as fresh as the file cache", async () => {
+    const now = Date.now();
+    seedDb(singleModelLimits("DB Model", new Date(now).toISOString()));
+    seedCache(singleModelLimits("File Model", new Date(now - 3_600_000).toISOString()));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const limits = await getUsageLimits();
+
+    expect(limits?.models[0].model).toBe("DB Model");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("prefers a newer file cache over the DB snapshot", async () => {
+    const now = Date.now();
+    seedDb(singleModelLimits("DB Model", new Date(now - 7_200_000).toISOString()));
+    seedCache(singleModelLimits("File Model", new Date(now).toISOString()));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const limits = await getUsageLimits();
+
+    expect(limits?.models[0].model).toBe("File Model");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the file cache when the DB fetched_at is unparseable", async () => {
+    seedDb(singleModelLimits("DB Model", "not-a-date"));
+    seedCache(singleModelLimits("File Model", new Date().toISOString()));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const limits = await getUsageLimits();
+
+    expect(limits?.models[0].model).toBe("File Model");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the DB snapshot when the file fetched_at is unparseable", async () => {
+    seedDb(singleModelLimits("DB Model", new Date().toISOString()));
+    seedCache(singleModelLimits("File Model", "not-a-date"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const limits = await getUsageLimits();
+
+    expect(limits?.models[0].model).toBe("DB Model");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DB snapshot with no models", async () => {
+    seedDb(limitsFixture({ models: [] }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, text: async () => "" }));
+
+    expect(await getUsageLimits()).toBeNull();
+  });
+
+  it("ignores a DB snapshot whose models JSON is not an array", async () => {
+    getRawDb()
+      .prepare(
+        "INSERT INTO quota_snapshots (id, source, fetched_at, spend_budget, models) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run("opencode-go", USAGE_LIMITS_SOURCE_URL, new Date().toISOString(), "{}", "null");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, text: async () => "" }));
+
+    expect(await getUsageLimits()).toBeNull();
+  });
+
+  it("falls back to the file cache when the database is unusable", async () => {
+    const blocker = join(dbRoot, "blocker");
+    writeFileSync(blocker, "not a directory", "utf8");
+    resetDbForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = join(blocker, "history.sqlite");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(htmlResponse(DOCS_HTML)));
+
+    const limits = await getUsageLimits();
+
+    expect(limits?.models).toHaveLength(4);
+    expect(readFileSync(join(cacheDir, "usage-limits.json"), "utf8")).toContain("Grok 4.5");
+  });
 });
+
+function singleModelLimits(model: string, fetchedAt: string): UsageLimits {
+  return limitsFixture({
+    fetchedAt,
+    models: [{ model, perFiveHours: 10, perWeek: 20, perMonth: 30 }],
+  });
+}
 
 describe("quotaTier", () => {
   it("buckets a model by its 5h request estimate", () => {

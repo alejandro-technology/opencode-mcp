@@ -1,7 +1,10 @@
+import { writeFileSync } from "node:fs";
 import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetDbForTests } from "../../../src/modules/shared/db/index.js";
+import { upsertUsageLedger } from "../../../src/modules/shared/db/usage.js";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const createOpencodeClientMock = vi.fn();
@@ -39,12 +42,27 @@ function mockClient({
   });
 }
 
+const ORIGINAL_DB_ENV = process.env.OPENCODE_MCP_HISTORY_DB;
+const NO_LEDGER_REASON = "no usage ledger rows in the last 7 days";
+
+function restoreDbEnv(): void {
+  if (ORIGINAL_DB_ENV === undefined) delete process.env.OPENCODE_MCP_HISTORY_DB;
+  else process.env.OPENCODE_MCP_HISTORY_DB = ORIGINAL_DB_ENV;
+}
+
 describe("opencode_list_agents", () => {
   beforeEach(() => {
     killAllServers();
+    resetDbForTests();
+    restoreDbEnv();
     createOpencodeClientMock.mockReset();
     getUsageLimitsMock.mockReset();
     getUsageLimitsMock.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    resetDbForTests();
+    restoreDbEnv();
   });
 
   it("returns not_found for an unknown server", async () => {
@@ -154,6 +172,8 @@ describe("opencode_list_agents", () => {
             models: {
               defaults: { anthropic: "claude-sonnet-5" },
               quota_snapshot: null,
+              local_usage: null,
+              local_usage_reason: NO_LEDGER_REASON,
               providers: [
                 {
                   provider: "anthropic",
@@ -297,7 +317,13 @@ describe("opencode_list_agents", () => {
             server_id: "srv-1",
             directory: process.cwd(),
             agents: { native: [], custom: [] },
-            models: { defaults: {}, quota_snapshot: null, providers: [] },
+            models: {
+              defaults: {},
+              quota_snapshot: null,
+              local_usage: null,
+              local_usage_reason: NO_LEDGER_REASON,
+              providers: [],
+            },
           }),
         },
       ],
@@ -478,5 +504,73 @@ describe("opencode_list_agents", () => {
         },
       ],
     });
+  });
+
+  it("exposes rolling local usage next to the quota snapshot", async () => {
+    registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
+    mockClient();
+    const now = Date.now();
+    upsertUsageLedger({
+      runId: "run-recent",
+      taskId: "task-1",
+      sessionId: "ses-1",
+      capturedAt: now,
+      messageCount: 2,
+      inputTokens: 10,
+      outputTokens: 4,
+      reasoningTokens: 1,
+      cacheRead: 2,
+      cacheWrite: 3,
+      reportedCost: 0.25,
+      complete: true,
+      breakdown: null,
+    });
+    upsertUsageLedger({
+      runId: "run-older",
+      taskId: "task-1",
+      sessionId: "ses-1",
+      capturedAt: now - 6 * 3600 * 1000,
+      messageCount: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+      reasoningTokens: 1,
+      cacheRead: 1,
+      cacheWrite: 1,
+      reportedCost: 0.5,
+      complete: true,
+      breakdown: null,
+    });
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+
+    const result = await fake.getHandler()({ server_id: "srv-1" });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.models.local_usage_reason).toBeNull();
+    expect(payload.models.local_usage.five_hours.ledger_runs).toBe(1);
+    expect(payload.models.local_usage.five_hours.message_count).toBe(2);
+    expect(payload.models.local_usage.five_hours.input.value).toBe(10);
+    expect(payload.models.local_usage.seven_days.ledger_runs).toBe(2);
+    expect(payload.models.local_usage.seven_days.input.value).toBe(11);
+  });
+
+  it("keeps serving agents when the usage ledger database is unusable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "list-agents-db-"));
+    const blocker = join(root, "blocker");
+    writeFileSync(blocker, "not a directory", "utf8");
+    resetDbForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = join(blocker, "history.sqlite");
+    registerServer({ serverId: "srv-1", baseUrl: "http://127.0.0.1:4096", close: vi.fn() });
+    mockClient();
+    const fake = createFakeMcpServer();
+    registerOpencodeListAgents(fake.server);
+
+    const result = await fake.getHandler()({ server_id: "srv-1" });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.server_id).toBe("srv-1");
+    expect(payload.models.local_usage).toBeNull();
+    expect(payload.models.local_usage_reason).toContain("usage ledger unavailable");
+    await rm(root, { recursive: true, force: true });
   });
 });

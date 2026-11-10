@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Agent, Provider } from "@opencode-ai/sdk";
 import { z } from "zod";
+import { getRollingUsageSummary, type RollingUsageSummary } from "../shared/db/usage.js";
 import { jsonError, jsonResult } from "../shared/mcp-result.js";
 import { clientForServer } from "../shared/opencode-client.js";
 import { getServer } from "../shared/server-registry.js";
@@ -81,6 +82,36 @@ function errorMessage(error: unknown): string {
     return String(error.message);
   }
   return String(error);
+}
+
+const FIVE_HOURS_MS = 5 * 3600 * 1000;
+const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
+
+interface LocalUsage {
+  five_hours: RollingUsageSummary;
+  seven_days: RollingUsageSummary;
+}
+
+function collectLocalUsage(): {
+  local_usage: LocalUsage | null;
+  local_usage_reason: string | null;
+} {
+  try {
+    const fiveHours = getRollingUsageSummary(FIVE_HOURS_MS);
+    const sevenDays = getRollingUsageSummary(SEVEN_DAYS_MS);
+    if (sevenDays.ledger_runs === 0) {
+      return { local_usage: null, local_usage_reason: "no usage ledger rows in the last 7 days" };
+    }
+    return {
+      local_usage: { five_hours: fiveHours, seven_days: sevenDays },
+      local_usage_reason: null,
+    };
+  } catch (error) {
+    return {
+      local_usage: null,
+      local_usage_reason: `usage ledger unavailable: ${errorMessage(error)}`,
+    };
+  }
 }
 
 export function registerOpencodeListAgents(server: McpServer) {
@@ -170,6 +201,7 @@ export function registerOpencodeListAgents(server: McpServer) {
           models: {
             defaults,
             quota_snapshot: toQuotaSnapshot(limits),
+            ...collectLocalUsage(),
             providers: providers.map((provider) => toProviderSummary(provider, quotas)),
           },
         });

@@ -1,6 +1,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { eq } from "drizzle-orm";
+import { getDb } from "./db/index.js";
+import { quotaSnapshots } from "./db/schema.js";
 
 /** Page scraped for the OpenCode Go quota table. */
 const FETCH_URL = "https://opencode.ai/docs/es/go/";
@@ -10,6 +13,7 @@ export const USAGE_LIMITS_SOURCE_URL = "https://opencode.ai/docs/es/go/#límites
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 const CACHE_FILE_NAME = "usage-limits.json";
+const QUOTA_SNAPSHOT_ID = "opencode-go";
 
 /** Requests per 5h above which a model is treated as effectively cheap. */
 export const HIGH_VOLUME_MIN = 3_000;
@@ -82,14 +86,76 @@ export function getCacheTtlMs(): number {
  * there is neither a usable cache nor a usable response.
  */
 export async function getUsageLimits(): Promise<UsageLimits | null> {
-  const cached = readCache();
+  const cached = readSnapshot();
   if (cached && !isStale(cached)) return cached;
 
   const fetched = await fetchUsageLimits();
   if (!fetched) return cached;
 
   writeCache(fetched);
+  writeDbSnapshot(fetched);
   return fetched;
+}
+
+/** The freshest usable snapshot across the JSON file cache and the DB row. */
+function readSnapshot(): UsageLimits | null {
+  const file = readCache();
+  const db = readDbSnapshot();
+  if (!db) return file;
+  if (!file) return db;
+
+  const dbFetched = Date.parse(db.fetchedAt);
+  const fileFetched = Date.parse(file.fetchedAt);
+  if (Number.isNaN(dbFetched)) return file;
+  if (Number.isNaN(fileFetched)) return db;
+  return dbFetched >= fileFetched ? db : file;
+}
+
+function readDbSnapshot(): UsageLimits | null {
+  try {
+    const row = getDb()
+      .select()
+      .from(quotaSnapshots)
+      .where(eq(quotaSnapshots.id, QUOTA_SNAPSHOT_ID))
+      .get();
+    if (!row) return null;
+    if (row.models.length === 0) return null;
+    return {
+      source: row.source,
+      fetchedAt: row.fetchedAt,
+      spendBudget: row.spendBudget,
+      models: row.models,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeDbSnapshot(limits: UsageLimits): void {
+  try {
+    getDb()
+      .insert(quotaSnapshots)
+      .values({
+        id: QUOTA_SNAPSHOT_ID,
+        source: limits.source,
+        fetchedAt: limits.fetchedAt,
+        spendBudget: limits.spendBudget,
+        models: limits.models,
+      })
+      .onConflictDoUpdate({
+        target: quotaSnapshots.id,
+        set: {
+          source: limits.source,
+          fetchedAt: limits.fetchedAt,
+          spendBudget: limits.spendBudget,
+          models: limits.models,
+        },
+      })
+      .run();
+  } catch {
+    // The DB is an optional extra cache: a read-only or unavailable database
+    // must leave the JSON file path as the only persistence layer.
+  }
 }
 
 function isStale(limits: UsageLimits): boolean {
