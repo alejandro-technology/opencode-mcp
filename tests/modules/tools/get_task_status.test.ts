@@ -1,5 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetDbForTests } from "../../../src/modules/shared/db/index.js";
+import {
+  registerTask,
+  removeTask,
+  resetTaskRegistryForTests,
+} from "../../../src/modules/shared/task-registry.js";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const clientForTaskMock = vi.fn();
@@ -451,6 +459,54 @@ describe("opencode_get_task_status", () => {
     });
   });
 
+  it("reports durable cancellation without a backend with and without a tracked run", async () => {
+    registerTask({
+      taskId: "task-1",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-cancel",
+      cancelledAt: 5,
+      runs: [
+        {
+          run_id: "run-cancel",
+          message_id: "msg_cancel_status",
+          startedAt: 1,
+          reportReady: true,
+          report: {
+            changes: [],
+            verification: { state: "not_requested", checks: [], execution_state: "cancelled" },
+            diagnostics: [],
+            evidence: {
+              source: "workspace_delta",
+              inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
+              complete: true,
+              errors: [],
+              attribution: "uncertain_shared_workspace",
+            },
+          },
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeGetTaskStatus(fake.server);
+    const handler = fake.getHandler();
+    const withRun = JSON.parse((await handler({ task_id: "task-1" })).content[0].text);
+    expect(withRun).toMatchObject({
+      task_id: "task-1",
+      run_id: "run-cancel",
+      status: "cancelled",
+      verification: { state: "not_requested" },
+    });
+    removeTask("task-1");
+
+    registerTask({ taskId: "task-1", serverId: "srv", sessionId: "s1", cancelledAt: 6 });
+    const withoutRun = JSON.parse((await handler({ task_id: "task-1" })).content[0].text);
+    expect(withoutRun).toMatchObject({ task_id: "task-1", status: "cancelled" });
+    expect(withoutRun.run_id).toBeUndefined();
+    removeTask("task-1");
+  });
+
   it("attaches current-run diagnostics when status polling fails", async () => {
     registerTask({
       taskId: "task-1",
@@ -489,5 +545,92 @@ describe("opencode_get_task_status", () => {
       diagnostics: ["status observer failed"],
     });
     removeTask("task-1");
+  });
+});
+
+describe("durable status after restart", () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    directory = await mkdtemp(path.join(os.tmpdir(), "get-task-status-durable-"));
+    process.env.OPENCODE_MCP_HISTORY_DB = path.join(directory, "history.sqlite");
+  });
+
+  afterEach(async () => {
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = ":memory:";
+    resetDbForTests();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("returns cached current and historical runs from SQLite after a restart", async () => {
+    const report = {
+      changes: [],
+      verification: { state: "passed", checks: [], execution_state: "completed" },
+      diagnostics: [],
+      evidence: {
+        source: "workspace_delta",
+        inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
+        complete: true,
+        errors: [],
+        attribution: "uncertain_shared_workspace",
+      },
+    };
+    registerTask({
+      taskId: "restart-status",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-new",
+      runs: [
+        {
+          run_id: "run-old",
+          message_id: "msg_restart_old",
+          startedAt: 1,
+          reportReady: true,
+          executionState: "completed",
+          report,
+          result: {
+            task_id: "restart-status",
+            run_id: "run-old",
+            status: "completed",
+            result: "old result",
+          },
+        },
+        {
+          run_id: "run-new",
+          message_id: "msg_restart_new",
+          startedAt: 2,
+          reportReady: true,
+          executionState: "completed",
+          report,
+          result: {
+            task_id: "restart-status",
+            run_id: "run-new",
+            status: "completed",
+            result: "new result",
+          },
+        },
+      ],
+    });
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeGetTaskStatus(fake.server);
+    const handler = fake.getHandler();
+
+    const historical = JSON.parse(
+      (await handler({ task_id: "restart-status", run_id: "run-old" })).content[0].text,
+    );
+    expect(historical).toMatchObject({
+      run_id: "run-old",
+      status: "completed",
+      verification: { state: "passed" },
+    });
+    const current = JSON.parse((await handler({ task_id: "restart-status" })).content[0].text);
+    expect(current).toMatchObject({ run_id: "run-new", status: "completed", result: "new result" });
   });
 });

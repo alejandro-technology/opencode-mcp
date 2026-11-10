@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
+import { getRawDb } from "./db/index.js";
 
 export type ExpectedChange = { path: string; change: "created" | "modified" | "deleted" };
 export type VerificationCheck = {
@@ -443,6 +444,32 @@ export async function runCheck(
       } else finish(code, closeSignal);
     });
   });
+}
+
+const INSERT_BASELINE_SQL =
+  "INSERT OR REPLACE INTO workspace_baselines (run_id, relative_path, sha256) VALUES (?, ?, ?)";
+
+export function insertWorkspaceBaselineRows(runId: string, snapshot: WorkspaceSnapshot): void {
+  if (snapshot.files.size === 0) return;
+  const statement = getRawDb().prepare(INSERT_BASELINE_SQL);
+  for (const [relativePath, sha256] of snapshot.files) statement.run(runId, relativePath, sha256);
+}
+
+export function loadWorkspaceBaseline(runId: string): WorkspaceSnapshot | undefined {
+  const run = getRawDb()
+    .prepare("SELECT baseline_root FROM task_runs WHERE run_id = ?")
+    .get(runId) as { baseline_root: string | null } | undefined;
+  if (!run || run.baseline_root === null) return undefined;
+  const rows = getRawDb()
+    .prepare("SELECT relative_path, sha256 FROM workspace_baselines WHERE run_id = ?")
+    .all(runId) as Array<{ relative_path: string; sha256: string }>;
+  const files = new Map<string, string>();
+  for (const row of rows) files.set(row.relative_path, row.sha256);
+  return { root: run.baseline_root, files };
+}
+
+export function deleteWorkspaceBaseline(runId: string): void {
+  getRawDb().prepare("DELETE FROM workspace_baselines WHERE run_id = ?").run(runId);
 }
 
 const reservations: Array<{ root: string; exclusive: boolean; token: symbol }> = [];

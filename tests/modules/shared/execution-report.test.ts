@@ -3,11 +3,15 @@ import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getRawDb } from "../../../src/modules/shared/db/index.js";
 import {
   abortAndDrainChecks,
   captureReport,
   captureWorkspace,
   compareWorkspace,
+  deleteWorkspaceBaseline,
+  insertWorkspaceBaselineRows,
+  loadWorkspaceBaseline,
   processGroupStates,
   releaseWorkspace,
   reserveWorkspace,
@@ -609,5 +613,59 @@ describe("workspace reservations", () => {
     releaseWorkspace(Symbol("not reserved"));
     releaseWorkspace(requiredLease(token));
     await expect(reserveWorkspace(path.join(root, "missing"), false)).rejects.toThrow();
+  });
+});
+
+describe("persisted workspace baselines", () => {
+  function insertRun(runId: string, taskId: string, baselineRoot: string | null): void {
+    const raw = getRawDb();
+    raw
+      .prepare(
+        "INSERT INTO tasks (task_id, server_id, session_id, created_at, started_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(taskId, "server-1", "session-1", 1, 1);
+    raw
+      .prepare(
+        "INSERT INTO task_runs (run_id, task_id, message_id, started_at, dispatch_state, baseline_root) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(runId, taskId, `msg_${runId}`, 1, "accepted", baselineRoot);
+  }
+
+  it("stores, loads, and deletes baseline rows for a run", () => {
+    insertRun("baseline-run", "baseline-task", "/workspace");
+    const snapshot: WorkspaceSnapshot = {
+      root: "/workspace",
+      files: new Map([
+        ["a.txt", "hash-a"],
+        ["b.txt", "hash-b"],
+      ]),
+    };
+    insertWorkspaceBaselineRows("baseline-run", snapshot);
+    expect(loadWorkspaceBaseline("baseline-run")).toEqual(snapshot);
+
+    insertWorkspaceBaselineRows("baseline-run", { root: "/workspace", files: new Map() });
+    expect(loadWorkspaceBaseline("baseline-run")).toEqual({
+      root: "/workspace",
+      files: new Map([
+        ["a.txt", "hash-a"],
+        ["b.txt", "hash-b"],
+      ]),
+    });
+
+    const changed: WorkspaceSnapshot = {
+      root: "/workspace",
+      files: new Map([["c.txt", "hash-c"]]),
+    };
+    insertWorkspaceBaselineRows("baseline-run", changed);
+    deleteWorkspaceBaseline("baseline-run");
+    expect(loadWorkspaceBaseline("baseline-run")).toEqual({ root: "/workspace", files: new Map() });
+    getRawDb().prepare("DELETE FROM tasks WHERE task_id = ?").run("baseline-task");
+  });
+
+  it("returns undefined for missing runs and runs without a recorded root", () => {
+    insertRun("no-root-run", "no-root-task", null);
+    expect(loadWorkspaceBaseline("no-root-run")).toBeUndefined();
+    expect(loadWorkspaceBaseline("absent-run")).toBeUndefined();
+    getRawDb().prepare("DELETE FROM tasks WHERE task_id = ?").run("no-root-task");
   });
 });

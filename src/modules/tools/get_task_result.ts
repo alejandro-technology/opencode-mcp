@@ -72,6 +72,15 @@ export function registerOpencodeGetTaskResult(server: McpServer) {
         if (run?.result)
           return jsonResult({ ...run.result, workspace: task?.workspace, ...reportFields(run) });
         if (!task) return jsonError({ task_id, status: "not_found", message: unknownTaskHint() });
+        if (task.cancelledAt !== undefined)
+          return jsonResult({
+            task_id,
+            status: "cancelled",
+            result: null,
+            message: CANCELLED_TASK_MESSAGE,
+            workspace: task.workspace,
+            ...(run ? reportFields(run) : {}),
+          });
         return jsonError({
           task_id,
           status: "backend_unavailable",

@@ -1,7 +1,13 @@
+import { and, eq, isNull, or } from "drizzle-orm";
+import { getDb, getInstanceId, withImmediateTx } from "./db/index.js";
+import { taskRuns } from "./db/schema.js";
+import { upsertUsageLedger } from "./db/usage.js";
 import {
   abortAndDrainChecks,
   captureReport,
+  deleteWorkspaceBaseline,
   type ExecutionReport,
+  loadWorkspaceBaseline,
   releaseWorkspace,
 } from "./execution-report.js";
 import type { ExecutionUsageSnapshot } from "./execution-usage.js";
@@ -16,7 +22,13 @@ import {
   hasWork,
   sessionParts,
 } from "./opencode-client.js";
-import { allTasks, getTask, tasksForServer } from "./task-registry.js";
+import {
+  allTasks,
+  getTask,
+  type TaskRecord,
+  type TaskRunRecord,
+  tasksForServer,
+} from "./task-registry.js";
 
 function unavailableUsage(diagnostic: string): ExecutionUsageSnapshot {
   return {
@@ -27,8 +39,114 @@ function unavailableUsage(diagnostic: string): ExecutionUsageSnapshot {
   };
 }
 
+type RunPatch = Partial<typeof taskRuns.$inferInsert>;
+
 const observers = new Map<string, { stopped: boolean; taskId: string }>();
 const terminal = new Set(["completed", "failed", "empty", "cancelled"]);
+
+export function persistRunState(runId: string, patch: RunPatch): void {
+  getDb().update(taskRuns).set(patch).where(eq(taskRuns.runId, runId)).run();
+}
+
+export function claimRunFinalization(runId: string): number | undefined {
+  return withImmediateTx(() => {
+    const row = getDb()
+      .select({
+        observerInstanceId: taskRuns.observerInstanceId,
+        observerGeneration: taskRuns.observerGeneration,
+        finalizationStarted: taskRuns.finalizationStarted,
+      })
+      .from(taskRuns)
+      .where(eq(taskRuns.runId, runId))
+      .get();
+    if (!row) return undefined;
+    if (row.finalizationStarted) return undefined;
+    const instanceId = getInstanceId();
+    if (row.observerInstanceId !== null && row.observerInstanceId !== instanceId) return undefined;
+    const generation = row.observerGeneration + 1;
+    getDb()
+      .update(taskRuns)
+      .set({
+        observerInstanceId: instanceId,
+        observerGeneration: generation,
+        finalizationStarted: true,
+      })
+      .where(
+        and(
+          eq(taskRuns.runId, runId),
+          eq(taskRuns.finalizationStarted, false),
+          or(isNull(taskRuns.observerInstanceId), eq(taskRuns.observerInstanceId, instanceId)),
+        ),
+      )
+      .run();
+    return generation;
+  });
+}
+
+export function writeFinalizedRun(runId: string, generation: number, patch: RunPatch): boolean {
+  const result = getDb()
+    .update(taskRuns)
+    .set(patch)
+    .where(
+      and(
+        eq(taskRuns.runId, runId),
+        eq(taskRuns.observerInstanceId, getInstanceId()),
+        eq(taskRuns.observerGeneration, generation),
+      ),
+    )
+    .run();
+  return result.changes === 1;
+}
+
+function recordUsageLedger(task: TaskRecord, run: TaskRunRecord): void {
+  const usage = run.usage;
+  const report = usage?.report;
+  if (!usage || !report) return;
+  const session = report.session;
+  const parsed = Date.parse(usage.captured_at);
+  try {
+    upsertUsageLedger({
+      runId: run.run_id,
+      taskId: task.taskId,
+      sessionId: task.sessionId,
+      capturedAt: Number.isFinite(parsed) ? parsed : Date.now(),
+      messageCount: session.message_count,
+      inputTokens: session.input.value,
+      outputTokens: session.output.value,
+      reasoningTokens: session.reasoning.value,
+      cacheRead: session.cache_read.value,
+      cacheWrite: session.cache_write.value,
+      reportedCost: session.reported_cost.value,
+      complete: [
+        session.input,
+        session.output,
+        session.reasoning,
+        session.cache_read,
+        session.cache_write,
+        session.reported_cost,
+      ].every((metric) => metric.complete),
+      breakdown: session.breakdown,
+    });
+  } catch {}
+}
+
+function finalizeRunPersistence(task: TaskRecord, run: TaskRunRecord, generation?: number): void {
+  run.finalizedAt ??= Date.now();
+  const patch: RunPatch = {
+    executionState: run.executionState ?? null,
+    reportReady: run.reportReady,
+    finalizationStarted: run.finalizationStarted ?? false,
+    finalizationError: run.finalizationError ?? null,
+    finalizedAt: run.finalizedAt,
+    report: run.report,
+    usage: run.usage,
+    result: run.result,
+  };
+  if (generation !== undefined) writeFinalizedRun(run.run_id, generation, patch);
+  else persistRunState(run.run_id, patch);
+  recordUsageLedger(task, run);
+  deleteWorkspaceBaseline(run.run_id);
+}
 
 export function observeRun(taskId: string, runId: string): void {
   const task = getTask(taskId);
@@ -37,9 +155,14 @@ export function observeRun(taskId: string, runId: string): void {
   if (!run || run.reportReady) return;
   const state = { stopped: false, taskId };
   observers.set(runId, state);
+  persistRunState(runId, {
+    dispatchState: run.dispatchState ?? "accepted",
+    dispatchError: run.dispatchError ?? null,
+  });
   void (async () => {
     let errors = 0;
     let execution = "pending";
+    let finalizationGeneration: number | undefined;
     while (!state.stopped) {
       const current = getTask(taskId);
       if (!current) break;
@@ -57,8 +180,14 @@ export function observeRun(taskId: string, runId: string): void {
           errors = 0;
           execution = status.status;
           run.executionState = execution;
+          persistRunState(runId, { executionState: execution });
           if (terminal.has(status.status)) {
             if (run.finalizationStarted) break;
+            finalizationGeneration = claimRunFinalization(runId);
+            if (finalizationGeneration === undefined) {
+              state.stopped = true;
+              break;
+            }
             run.finalizationStarted = true;
             const finalExecution = run.cancelledAt !== undefined ? "cancelled" : status.status;
             run.executionState = finalExecution;
@@ -72,6 +201,7 @@ export function observeRun(taskId: string, runId: string): void {
               run.usage = unavailableUsage(
                 "usage unavailable: no final message snapshot was returned",
               );
+            persistRunState(runId, { executionState: finalExecution, usage: run.usage });
             const verificationRequested = Boolean(
               run.expectedChanges?.length || run.checks?.length,
             );
@@ -88,9 +218,11 @@ export function observeRun(taskId: string, runId: string): void {
                   attribution: "uncertain_shared_workspace",
                 },
               };
-            run.report = run.baseline
+            const baseline =
+              run.baselineRoot !== undefined ? loadWorkspaceBaseline(run.run_id) : undefined;
+            run.report = baseline
               ? await captureReport(
-                  run.baseline,
+                  baseline,
                   run.expectedChanges ?? [],
                   run.checks ?? [],
                   finalExecution,
@@ -115,6 +247,7 @@ export function observeRun(taskId: string, runId: string): void {
               ...run.report.verification,
               execution_state: finalExecution,
             };
+            persistRunState(runId, { report: run.report });
             const checksDrained = run.report.verification.checks.every(
               (check) => check.termination_confirmed !== false,
             );
@@ -126,17 +259,28 @@ export function observeRun(taskId: string, runId: string): void {
               run.report.evidence.complete = false;
               run.report.evidence.errors.push("check process termination not confirmed");
               run.finalizationError = "check process termination was not confirmed";
+              persistRunState(runId, {
+                report: run.report,
+                finalizationError: run.finalizationError,
+              });
             }
             if (run.dispatchError)
               run.report.diagnostics.unshift(
                 `prompt dispatch acknowledgement was uncertain: ${run.dispatchError}`,
               );
-            await cacheFinalResult(taskId, runId, finalExecution, status.error);
+            await cacheFinalResult(
+              taskId,
+              runId,
+              finalExecution,
+              status.error,
+              finalizationGeneration,
+            );
             run.reportReady = true;
             if (checksDrained && run.workspaceLease) {
               releaseWorkspace(run.workspaceLease);
               run.workspaceLease = undefined;
             }
+            finalizeRunPersistence(task, run, finalizationGeneration);
             state.stopped = true;
             break;
           }
@@ -169,6 +313,7 @@ export function observeRun(taskId: string, runId: string): void {
             error: run.finalizationError,
           };
           run.reportReady = true;
+          finalizeRunPersistence(task, run, finalizationGeneration);
           state.stopped = true;
           break;
         }
@@ -203,6 +348,7 @@ export function observeRun(taskId: string, runId: string): void {
         run.reportReady = true;
         // The session may still be writing despite failed status reads. Keep its
         // lease until confirmed cancellation or server shutdown; never infer exit.
+        finalizeRunPersistence(task, run);
         state.stopped = true;
         break;
       }
@@ -217,6 +363,7 @@ async function cacheFinalResult(
   runId: string,
   status: string,
   error?: string,
+  generation?: number,
 ): Promise<void> {
   const task = getTask(taskId);
   const run = task?.runs?.find((item) => item.run_id === runId);
@@ -235,6 +382,7 @@ async function cacheFinalResult(
       error: "OpenCode server unavailable",
       usage: run.usage,
     };
+    persistRunResult(runId, run, generation);
     return;
   }
   try {
@@ -270,6 +418,7 @@ async function cacheFinalResult(
           }),
     };
     run.usage ??= run.result.usage as ExecutionUsageSnapshot;
+    persistRunResult(runId, run, generation);
   } catch (cause) {
     run.usage ??= unavailableUsage(
       `usage unavailable: final task messages could not be fetched (${cause instanceof Error ? cause.message : String(cause)})`,
@@ -291,13 +440,25 @@ async function cacheFinalResult(
     );
     finalizedReport.evidence.complete = false;
     finalizedReport.evidence.errors.push("final task output unavailable");
+    persistRunResult(runId, run, generation);
   }
+}
+
+function persistRunResult(runId: string, run: TaskRunRecord, generation?: number): void {
+  const patch: RunPatch = {
+    usage: run.usage,
+    result: run.result,
+    report: run.report,
+  };
+  if (generation !== undefined) writeFinalizedRun(runId, generation, patch);
+  else persistRunState(runId, patch);
 }
 
 export async function stopRunObservers(timeoutMs = 5_000): Promise<boolean> {
   let allDrained = true;
   for (const task of allTasks()) {
     for (const run of task.runs ?? []) {
+      if (run.reportReady && run.workspaceLease === undefined) continue;
       const drained = run.controller ? await abortAndDrainChecks(run.controller, timeoutMs) : true;
       if (!drained) allDrained = false;
       run.usage ??= unavailableUsage("usage unavailable: MCP server stopped before finalization");
@@ -341,6 +502,7 @@ export async function stopRunObservers(timeoutMs = 5_000): Promise<boolean> {
         releaseWorkspace(run.workspaceLease);
         run.workspaceLease = undefined;
       }
+      finalizeRunPersistence(task, run);
     }
   }
   for (const state of observers.values()) {
@@ -354,6 +516,7 @@ export async function stopServerObservers(serverId: string, timeoutMs = 5_000): 
   let allDrained = true;
   for (const task of tasksForServer(serverId)) {
     for (const run of task.runs ?? []) {
+      if (run.reportReady && run.workspaceLease === undefined) continue;
       const drained = run.controller ? await abortAndDrainChecks(run.controller, timeoutMs) : true;
       if (!drained) allDrained = false;
       run.usage ??= unavailableUsage(
@@ -397,6 +560,7 @@ export async function stopServerObservers(serverId: string, timeoutMs = 5_000): 
         releaseWorkspace(run.workspaceLease);
         run.workspaceLease = undefined;
       }
+      finalizeRunPersistence(task, run);
     }
   }
   for (const [runId, state] of observers) {
@@ -421,9 +585,10 @@ export async function finishConfirmedCancellation(taskId: string): Promise<void>
     return;
   const drained = run.controller ? await abortAndDrainChecks(run.controller, 5_000) : true;
   run.executionState = "cancelled";
-  run.report = run.baseline
+  const baseline = run.baselineRoot !== undefined ? loadWorkspaceBaseline(run.run_id) : undefined;
+  run.report = baseline
     ? await captureReport(
-        run.baseline,
+        baseline,
         run.expectedChanges ?? [],
         run.checks ?? [],
         "cancelled",
@@ -465,4 +630,9 @@ export async function finishConfirmedCancellation(taskId: string): Promise<void>
     releaseWorkspace(run.workspaceLease);
     run.workspaceLease = undefined;
   }
+  finalizeRunPersistence(task, run);
+}
+
+export function resetRunObserversForTests(): void {
+  observers.clear();
 }

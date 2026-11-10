@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -201,7 +200,7 @@ function open(): DbState {
 
   migrate(sqlite);
 
-  const instanceId = randomUUID();
+  const instanceId = globalThis.crypto.randomUUID();
   const now = Date.now();
   sqlite
     .prepare(

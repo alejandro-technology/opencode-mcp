@@ -8,6 +8,7 @@ const {
   deriveTaskStatusMock,
   assistantEntriesMock,
   hasWorkMock,
+  upsertUsageLedgerMock,
 } = vi.hoisted(() => ({
   abortAndDrainMock: vi.fn(),
   captureReportMock: vi.fn(),
@@ -16,6 +17,7 @@ const {
   deriveTaskStatusMock: vi.fn(),
   assistantEntriesMock: vi.fn(),
   hasWorkMock: vi.fn(),
+  upsertUsageLedgerMock: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/shared/execution-report.js", async (importOriginal) => {
@@ -26,6 +28,13 @@ vi.mock("../../../src/modules/shared/execution-report.js", async (importOriginal
     abortAndDrainChecks: abortAndDrainMock,
     captureReport: captureReportMock,
     releaseWorkspace: releaseWorkspaceMock,
+  };
+});
+vi.mock("../../../src/modules/shared/db/usage.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/modules/shared/db/usage.js")>();
+  return {
+    ...actual,
+    upsertUsageLedger: (...args: unknown[]) => upsertUsageLedgerMock(...args),
   };
 });
 vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
@@ -39,11 +48,19 @@ vi.mock("../../../src/modules/shared/opencode-client.js", () => ({
   sessionParts: vi.fn(() => []),
 }));
 
-const { getTask, registerTask, removeTask } = await import(
+const { acceptTaskRun, getTask, registerTask, removeTask } = await import(
   "../../../src/modules/shared/task-registry.js"
 );
-const { finishConfirmedCancellation, observeRun, stopRunObservers, stopServerObservers } =
-  await import("../../../src/modules/shared/run-observer.js");
+const {
+  claimRunFinalization,
+  finishConfirmedCancellation,
+  observeRun,
+  resetRunObserversForTests,
+  stopRunObservers,
+  stopServerObservers,
+  writeFinalizedRun,
+} = await import("../../../src/modules/shared/run-observer.js");
+const { getRawDb } = await import("../../../src/modules/shared/db/index.js");
 
 const report = () => ({
   changes: [{ path: "made.txt", change: "created", evidence: "workspace_delta" as const }],
@@ -96,10 +113,12 @@ beforeEach(() => {
     },
   ]);
   hasWorkMock.mockReset().mockReturnValue(true);
+  upsertUsageLedgerMock.mockReset();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  resetRunObserversForTests();
   for (const taskId of [
     "success",
     "cache-error",
@@ -182,8 +201,11 @@ describe("run observer", () => {
       diagnostic: "one usage field was unavailable",
     });
 
-    task.runs?.push({ run_id: "run-later", message_id: "msg-later", startedAt: Date.now() + 1 });
-    task.currentRunId = "run-later";
+    acceptTaskRun("usage-history", {
+      run_id: "run-later",
+      message_id: "msg-later",
+      startedAt: Date.now() + 1,
+    });
     deriveTaskStatusMock.mockResolvedValueOnce({
       task_id: "usage-history",
       status: "completed",
@@ -298,7 +320,7 @@ describe("run observer", () => {
     run.cancelledAt = Date.now();
     await finishConfirmedCancellation("cancel");
     expect(captureReportMock).toHaveBeenCalledWith(
-      run.baseline,
+      expect.objectContaining({ root: "/workspace" }),
       run.expectedChanges,
       run.checks,
       "cancelled",
@@ -668,7 +690,7 @@ describe("run observer", () => {
     baselineRun.cancelledAt = Date.now();
     await finishConfirmedCancellation("cancel-defaults");
     expect(captureReportMock).toHaveBeenCalledWith(
-      baselineRun.baseline,
+      expect.objectContaining({ root: "/workspace" }),
       [],
       [],
       "cancelled",
@@ -730,5 +752,200 @@ describe("run observer", () => {
     expect(task.runs?.[0].workspaceLease).toBe(lease);
     expect(task.runs?.[0].report?.verification.state).toBe("unavailable");
     expect(releaseWorkspaceMock).not.toHaveBeenCalled();
+  });
+});
+
+function metric(value: number) {
+  return { value, complete: true, missing_messages: 0 };
+}
+
+function fullUsageReport() {
+  return {
+    currency: null,
+    cost_label: "reported_by_opencode_not_invoiced_cost",
+    scope: {
+      session_messages: "all_direct_assistant_messages_passed",
+      run_messages: "direct_assistant_messages_parented_to_current_user_message",
+      descendants_included: false,
+      subagent_sessions_included: false,
+    },
+    run: null,
+    session: {
+      message_count: 2,
+      input: metric(5),
+      output: metric(6),
+      reasoning: metric(1),
+      cache_read: metric(2),
+      cache_write: metric(3),
+      reported_cost: metric(0.5),
+      breakdown: [
+        {
+          provider_id: "provider",
+          model_id: "model",
+          message_count: 2,
+          input: metric(5),
+          output: metric(6),
+          reasoning: metric(1),
+          cache_read: metric(2),
+          cache_write: metric(3),
+          reported_cost: metric(0.5),
+        },
+      ],
+    },
+  };
+}
+
+describe("run observer persistence", () => {
+  it("claims finalization once and refuses stale or foreign writers", () => {
+    register("fence", { baseline: { root: "/workspace", files: new Map() } });
+    expect(claimRunFinalization("run-fence")).toBe(1);
+    expect(claimRunFinalization("run-fence")).toBeUndefined();
+    expect(writeFinalizedRun("run-fence", 1, { executionState: "completed" })).toBe(true);
+
+    getRawDb()
+      .prepare("UPDATE task_runs SET observer_generation = 2 WHERE run_id = ?")
+      .run("run-fence");
+    expect(writeFinalizedRun("run-fence", 1, { executionState: "failed" })).toBe(false);
+
+    getRawDb()
+      .prepare("UPDATE task_runs SET observer_instance_id = ? WHERE run_id = ?")
+      .run("other-instance", "run-fence");
+    expect(writeFinalizedRun("run-fence", 2, { executionState: "failed" })).toBe(false);
+    expect(writeFinalizedRun("missing-run", 1, { executionState: "failed" })).toBe(false);
+    removeTask("fence");
+  });
+
+  it("refuses claims for runs owned by another instance or missing runs", () => {
+    register("fence-other", { baseline: { root: "/workspace", files: new Map() } });
+    getRawDb()
+      .prepare(
+        "UPDATE task_runs SET observer_instance_id = ?, finalization_started = 0 WHERE run_id = ?",
+      )
+      .run("other-instance", "run-fence-other");
+    expect(claimRunFinalization("run-fence-other")).toBeUndefined();
+    expect(claimRunFinalization("missing-run")).toBeUndefined();
+    removeTask("fence-other");
+  });
+
+  it("stops observing when another writer already claimed finalization", async () => {
+    const task = register("claimed-elsewhere", {
+      baseline: { root: "/workspace", files: new Map() },
+    });
+    claimRunFinalization("run-claimed-elsewhere");
+    observeRun("claimed-elsewhere", "run-claimed-elsewhere");
+    await vi.waitFor(() => expect(deriveTaskStatusMock).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(task.runs?.[0].reportReady).toBeUndefined();
+    removeTask("claimed-elsewhere");
+  });
+
+  it("records a finalized usage snapshot in the usage ledger", async () => {
+    const task = register("ledger", { baseline: { root: "/workspace", files: new Map() } });
+    deriveTaskStatusMock.mockResolvedValueOnce({
+      task_id: "ledger",
+      status: "completed",
+      usage: {
+        captured_at: "2026-10-08T00:00:00.000Z",
+        snapshot_kind: "live_observation",
+        report: fullUsageReport(),
+      },
+    });
+    observeRun("ledger", "run-ledger");
+    await waitForReady("ledger");
+    expect(upsertUsageLedgerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-ledger",
+        taskId: "ledger",
+        sessionId: "session-1",
+        capturedAt: Date.parse("2026-10-08T00:00:00.000Z"),
+        messageCount: 2,
+        inputTokens: 5,
+        outputTokens: 6,
+        reasoningTokens: 1,
+        cacheRead: 2,
+        cacheWrite: 3,
+        reportedCost: 0.5,
+        complete: true,
+      }),
+    );
+    expect(task.runs?.[0].reportReady).toBe(true);
+    removeTask("ledger");
+  });
+
+  it("falls back to the current time for an unparseable usage timestamp", async () => {
+    register("ledger-clock", { baseline: { root: "/workspace", files: new Map() } });
+    deriveTaskStatusMock.mockResolvedValueOnce({
+      task_id: "ledger-clock",
+      status: "completed",
+      usage: {
+        captured_at: "not-a-date",
+        snapshot_kind: "live_observation",
+        report: fullUsageReport(),
+      },
+    });
+    observeRun("ledger-clock", "run-ledger-clock");
+    await waitForReady("ledger-clock");
+    expect(upsertUsageLedgerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ capturedAt: expect.any(Number) }),
+    );
+    removeTask("ledger-clock");
+  });
+
+  it("keeps finalization successful when the usage ledger write throws", async () => {
+    upsertUsageLedgerMock.mockImplementationOnce(() => {
+      throw new Error("ledger unavailable");
+    });
+    const task = register("ledger-fail", { baseline: { root: "/workspace", files: new Map() } });
+    deriveTaskStatusMock.mockResolvedValueOnce({
+      task_id: "ledger-fail",
+      status: "completed",
+      usage: {
+        captured_at: "2026-10-08T00:00:00.000Z",
+        snapshot_kind: "live_observation",
+        report: fullUsageReport(),
+      },
+    });
+    observeRun("ledger-fail", "run-ledger-fail");
+    await waitForReady("ledger-fail");
+    expect(task.runs?.[0].reportReady).toBe(true);
+    expect(task.runs?.[0].result?.status).toBe("completed");
+    removeTask("ledger-fail");
+  });
+
+  it("deletes persisted baseline rows once the run report is finalized", async () => {
+    register("baseline-cleanup", {
+      baseline: { root: "/workspace", files: new Map([["a.txt", "hash-a"]]) },
+      expectedChanges: [{ path: "a.txt", change: "created" }],
+    });
+    const count = () =>
+      getRawDb()
+        .prepare("SELECT COUNT(*) AS count FROM workspace_baselines WHERE run_id = ?")
+        .get("run-baseline-cleanup") as { count: number };
+    expect(count().count).toBe(1);
+    observeRun("baseline-cleanup", "run-baseline-cleanup");
+    await waitForReady("baseline-cleanup");
+    expect(count().count).toBe(0);
+    removeTask("baseline-cleanup");
+  });
+
+  it("skips finalized runs without live handles during shutdown", async () => {
+    const task = register("shutdown-skip", {
+      report: report(),
+      reportReady: true,
+      executionState: "completed",
+      workspaceLease: Symbol("skip-run-lease"),
+    });
+    const serverTask = register("shutdown-skip-server", {
+      report: report(),
+      reportReady: true,
+      executionState: "completed",
+      workspaceLease: Symbol("skip-server-lease"),
+    });
+    await stopServerObservers("server-1");
+    await stopRunObservers();
+    expect(task.runs?.[0].report).toEqual(report());
+    expect(serverTask.runs?.[0].report).toEqual(report());
+    removeTask("shutdown-skip");
+    removeTask("shutdown-skip-server");
   });
 });

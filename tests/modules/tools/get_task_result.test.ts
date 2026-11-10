@@ -1,10 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetDbForTests } from "../../../src/modules/shared/db/index.js";
 import { buildExecutionUsage } from "../../../src/modules/shared/execution-usage.js";
 import {
   CANCELLED_TASK_MESSAGE,
   EMPTY_TURN_MESSAGE,
 } from "../../../src/modules/shared/opencode-client.js";
-import { getTask, registerTask, removeTask } from "../../../src/modules/shared/task-registry.js";
+import {
+  getTask,
+  registerTask,
+  removeTask,
+  resetTaskRegistryForTests,
+} from "../../../src/modules/shared/task-registry.js";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const clientForTaskMock = vi.fn();
@@ -693,5 +702,142 @@ describe("opencode_get_task_result", () => {
       message: "weird",
       usage: { report: null, diagnostic: "usage unavailable: weird" },
     });
+  });
+});
+
+describe("durable result after restart", () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    directory = await mkdtemp(path.join(os.tmpdir(), "get-task-result-durable-"));
+    process.env.OPENCODE_MCP_HISTORY_DB = path.join(directory, "history.sqlite");
+  });
+
+  afterEach(async () => {
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    process.env.OPENCODE_MCP_HISTORY_DB = ":memory:";
+    resetDbForTests();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("returns a cached historical report and cancellation from SQLite after a restart", async () => {
+    const report = {
+      changes: [{ path: "old.txt", change: "created", evidence: "workspace_delta" }],
+      verification: { state: "passed", checks: [], execution_state: "completed" },
+      diagnostics: [],
+      evidence: {
+        source: "workspace_delta",
+        inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
+        complete: true,
+        errors: [],
+        attribution: "uncertain_shared_workspace",
+      },
+    };
+    registerTask({
+      taskId: "restart-result",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-new",
+      cancelledAt: 9,
+      runs: [
+        {
+          run_id: "run-old",
+          message_id: "msg_restart_result_old",
+          startedAt: 1,
+          reportReady: true,
+          executionState: "completed",
+          report,
+          result: {
+            task_id: "restart-result",
+            run_id: "run-old",
+            status: "completed",
+            result: "old result",
+          },
+        },
+      ],
+    });
+    resetTaskRegistryForTests();
+    resetDbForTests();
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeGetTaskResult(fake.server);
+    const handler = fake.getHandler();
+
+    const historical = JSON.parse(
+      (await handler({ task_id: "restart-result", run_id: "run-old" })).content[0].text,
+    );
+    expect(historical).toMatchObject({
+      run_id: "run-old",
+      status: "completed",
+      result: "old result",
+      verification: { state: "passed" },
+      changes: [{ path: "old.txt", change: "created" }],
+    });
+    const current = JSON.parse((await handler({ task_id: "restart-result" })).content[0].text);
+    expect(current).toMatchObject({
+      status: "cancelled",
+      result: null,
+      message: CANCELLED_TASK_MESSAGE,
+    });
+  });
+});
+
+describe("cancelled results without a backend", () => {
+  it("reports durable cancellation with and without a tracked run", async () => {
+    registerTask({
+      taskId: "task-1",
+      serverId: "srv",
+      sessionId: "s1",
+      currentRunId: "run-cancel",
+      cancelledAt: 5,
+      runs: [
+        {
+          run_id: "run-cancel",
+          message_id: "msg_cancel_run",
+          startedAt: 1,
+          reportReady: true,
+          report: {
+            changes: [],
+            verification: { state: "not_requested", checks: [], execution_state: "cancelled" },
+            diagnostics: [],
+            evidence: {
+              source: "workspace_delta",
+              inventory_scope: "recursive_except_git_and_node_modules_plus_explicit_paths",
+              complete: true,
+              errors: [],
+              attribution: "uncertain_shared_workspace",
+            },
+          },
+        },
+      ],
+    });
+    clientForTaskMock.mockReturnValue(undefined);
+    const fake = createFakeMcpServer();
+    registerOpencodeGetTaskResult(fake.server);
+    const handler = fake.getHandler();
+
+    const withRun = JSON.parse((await handler({ task_id: "task-1" })).content[0].text);
+    expect(withRun).toMatchObject({
+      task_id: "task-1",
+      run_id: "run-cancel",
+      status: "cancelled",
+      result: null,
+      message: CANCELLED_TASK_MESSAGE,
+      verification: { state: "not_requested" },
+    });
+    removeTask("task-1");
+
+    registerTask({ taskId: "task-1", serverId: "srv", sessionId: "s1", cancelledAt: 6 });
+    const withoutRun = JSON.parse((await handler({ task_id: "task-1" })).content[0].text);
+    expect(withoutRun).toMatchObject({
+      task_id: "task-1",
+      status: "cancelled",
+      result: null,
+      message: CANCELLED_TASK_MESSAGE,
+    });
+    removeTask("task-1");
   });
 });
