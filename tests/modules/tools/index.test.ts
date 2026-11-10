@@ -13,6 +13,7 @@ describe("registerTools", () => {
       "opencode_start_server",
       "opencode_stop_server",
       "opencode_list_agents",
+      "opencode_list_servers",
       "opencode_start_task",
       "opencode_get_task_status",
       "opencode_get_task_result",

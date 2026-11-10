@@ -1,5 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDb, resetDbForTests } from "../../../src/modules/shared/db/index.js";
+import { servers as serversTable } from "../../../src/modules/shared/db/schema.js";
 import { createFakeMcpServer } from "../../../src/test-utils/fake-mcp-server.js";
 
 const createOpencodeServerMock = vi.fn();
@@ -94,6 +96,7 @@ describe("opencode_start_server", () => {
             directory: await realpath(process.cwd()),
             status: "running",
             permissions: { external_directory: "read-only", auto_approved: true },
+            existing_active_servers: [],
           }),
         },
       ],
@@ -339,5 +342,34 @@ describe("opencode_start_server", () => {
         },
       ],
     });
+  });
+
+  it("reports existing active servers from the database", async () => {
+    resetDbForTests();
+    const now = Date.now();
+    getDb()
+      .insert(serversTable)
+      .values({
+        serverId: "existing-srv",
+        ownerInstanceId: "other-instance",
+        baseUrl: "http://127.0.0.1:4099",
+        directory: "/tmp/existing",
+        permissionPolicy: "read-only",
+        startedAt: now,
+        stoppedAt: null,
+      })
+      .run();
+
+    createOpencodeServerMock.mockResolvedValue({ url: "http://127.0.0.1:4096", close: vi.fn() });
+    const fake = createFakeMcpServer();
+    registerOpencodeStartServer(fake.server);
+
+    const result = await fake.getHandler()({ port: undefined });
+
+    expect(JSON.parse(result.content[0].text).existing_active_servers).toEqual([
+      { base_url: "http://127.0.0.1:4099", port: 4099, directory: "/tmp/existing" },
+    ]);
+
+    resetDbForTests();
   });
 });

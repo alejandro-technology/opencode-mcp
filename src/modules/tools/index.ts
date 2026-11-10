@@ -6,6 +6,7 @@ import { registerOpencodeContinueTask } from "./continue_task.js";
 import { registerOpencodeGetTaskResult } from "./get_task_result.js";
 import { registerOpencodeGetTaskStatus } from "./get_task_status.js";
 import { registerOpencodeListAgents } from "./list_agents.js";
+import { registerOpencodeListServers } from "./list_servers.js";
 import { registerOpencodeStartServer } from "./start_server.js";
 import { registerOpencodeStartTask } from "./start_task.js";
 import { registerOpencodeStopServer } from "./stop_server.js";
@@ -15,6 +16,7 @@ export function registerTools(server: McpServer) {
   registerOpencodeStartServer(server);
   registerOpencodeStopServer(server);
   registerOpencodeListAgents(server);
+  registerOpencodeListServers(server);
   registerOpencodeStartTask(server);
   registerOpencodeGetTaskStatus(server);
   registerOpencodeGetTaskResult(server);

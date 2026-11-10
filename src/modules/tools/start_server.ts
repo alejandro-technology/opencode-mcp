@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Config, createOpencodeServer } from "@opencode-ai/sdk";
+import { asc, isNull } from "drizzle-orm";
 import { z } from "zod";
+import { getDb } from "../shared/db/index.js";
+import { servers as serversTable } from "../shared/db/schema.js";
 import { stopPermissionScopesForServer } from "../shared/permission-scopes.js";
 import { buildServerConfig, getExternalDirectoryPolicy } from "../shared/permissions.js";
 import { registerServer } from "../shared/server-registry.js";
@@ -46,6 +49,18 @@ export function registerOpencodeStartServer(server: McpServer) {
         );
         const serverId = randomUUID();
 
+        const existingRows = getDb()
+          .select()
+          .from(serversTable)
+          .where(isNull(serversTable.stoppedAt))
+          .orderBy(asc(serversTable.startedAt))
+          .all();
+        const existing_active_servers = existingRows.map((row) => ({
+          base_url: row.baseUrl,
+          port: Number(new URL(row.baseUrl).port),
+          directory: row.directory,
+        }));
+
         registerServer({
           serverId,
           baseUrl: instance.url,
@@ -71,6 +86,7 @@ export function registerOpencodeStartServer(server: McpServer) {
                   external_directory: policy,
                   auto_approved: true,
                 },
+                existing_active_servers,
               }),
             },
           ],
