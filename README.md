@@ -65,7 +65,7 @@ Tasks run in the selected existing directory (`shared`, the default), or in an i
 
 Status, wait, and result responses include run and session usage snapshots, with metrics broken down by provider and model. Missing metrics remain unknown rather than zero, and cost is OpenCode-reported—not an invoice total. Finalized runs retain their snapshots for historical retrieval.
 
-Task history and workspace ownership are held in memory for the lifetime of the MCP process. Restarting loses these records; retained worktrees are not automatically rediscovered.
+Task, run, server, workspace, and usage records live in a SQLite database shared by every MCP process on the host (`OPENCODE_MCP_HISTORY_DB` overrides the location). Records survive restarts: retained worktrees are rediscovered for cleanup, and finalized runs remain retrievable by `run_id`.
 
 ## Installation
 

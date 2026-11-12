@@ -9,6 +9,82 @@ Releases before `1.2.0` predate this file and are not documented here.
 
 ## Unreleased
 
+## [1.5.0] — 2026-11-12
+
+Task, run, server, workspace, and usage records now live in a shared SQLite
+database instead of process-local memory, implementing
+`docs/sqlite-persistence-plan.md`. Because OpenCode 1.19.x spawns one MCP
+process per session directory, this state was previously invisible to
+sibling processes and was lost on every restart.
+
+### Behavior changes callers must handle
+
+- **History survives restarts.** `opencode_get_task_status` /
+  `opencode_get_task_result` (including historical `run_id` retrieval) and
+  `opencode_cleanup_workspace` now work after the MCP process restarts and
+  across the sibling processes OpenCode spawns per session directory;
+  retained worktrees are rediscovered from the durable record instead of
+  reporting `workspace_not_found`.
+- **Workspace leases are enforced across processes.** A verified run held a
+  directory lease only inside its own process, so a second MCP process
+  could mutate and verify the same directory concurrently. Overlapping
+  verified runs in different processes now conflict with `workspace_busy`.
+- A durably-cancelled task whose OpenCode server/session can no longer be
+  resolved now reports `cancelled` from `opencode_get_task_status` /
+  `opencode_get_task_result` instead of `backend_unavailable`.
+
+### Added
+
+- **SQLite state foundation** (`src/modules/shared/db/`): `better-sqlite3`
+  under `drizzle-orm` opens a WAL database, bootstraps its schema
+  idempotently (`CREATE TABLE IF NOT EXISTS` guarded by
+  `PRAGMA user_version`), and registers the process in `mcp_instances`
+  with heartbeats and PID-reuse protection. Location: `OPENCODE_MCP_HISTORY_DB`
+  > `$XDG_STATE_HOME` > `~/.local/state/opencode-mcp/history.sqlite`.
+  Writes use short synchronous `BEGIN IMMEDIATE` transactions and never
+  span async I/O.
+- **New tool `opencode_list_servers`**: lists every server known to this
+  host — active and stopped — with base URL, port, directory, permission
+  policy, owner instance, an 800 ms liveness probe, and per-server
+  task/session aggregates. Server instructions now direct agents to call
+  it before `opencode_start_server`, and `opencode_start_server`
+  responses include `existing_active_servers`.
+- **`opencode_list_agents` reports `local_usage`**: rolling 5 h and 7 d
+  aggregates from the durable usage ledger (message counts, token totals,
+  OpenCode-reported cost, per-model breakdown) alongside the static quota
+  tiers; `local_usage_reason` explains an empty or unavailable ledger.
+- **Durable managed worktrees**: worktree identity (canonical paths, base
+  commit, state) persists in `workspaces`; cleanup, metadata, and removal
+  re-hydrate after restarts, and conditional `active`→`cleaning`
+  transitions stop two processes racing the same cleanup. All previous
+  Git safety checks are preserved.
+- **Durable tasks and runs**: `tasks` / `task_runs` /
+  `task_dispatch_leases` are the source of truth for task registration,
+  per-prompt runs, dispatch reservations (stale leases of dead processes
+  are reaped), cancellation stamps, reports, cached results, and usage
+  snapshots. Run baselines moved out of the JS heap into
+  `workspace_baselines` rows, deleted once the report is captured.
+- **Cross-process workspace leases** (`workspace_leases`): shared/exclusive
+  path-overlap checks run inside `BEGIN IMMEDIATE` transactions, leases of
+  dead processes are reaped, and finalized terminal runs older than a
+  bounded retention window are pruned without touching active, uncertain,
+  or dirty-worktree records.
+- **Usage ledger and quota snapshot persistence**: run finalization
+  upserts direct-message metrics into `usage_ledger` (indexed by timestamp
+  for rolling-window queries); the quota snapshot persists to
+  `quota_snapshots` with the JSON file cache kept as fallback.
+- **Durable run finalization**: the background observer's state
+  transitions (`execution_state`, report, usage, cached result) persist
+  with `observer_generation` fencing so only one process finalizes a run.
+
+### Changed
+
+- Add `better-sqlite3` and `drizzle-orm` runtime dependencies; the test
+  suite defaults to `OPENCODE_MCP_HISTORY_DB=":memory:"` so it stays
+  hermetic (point the variable at a file to exercise persistence).
+- README and AGENTS.md no longer describe task, server, or workspace state
+  as process-local.
+
 ## [1.4.0] — 2026-11-08
 
 Version `1.3.1` was prepared in the repository but never published to npm — its
